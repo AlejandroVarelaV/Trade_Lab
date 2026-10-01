@@ -23,9 +23,9 @@ Scenarios live in `config/scenarios.yaml`. Adding or removing one is a config ch
 |---|---|
 | Capital (EUR) | 200, 500, 1000 |
 | Risk profile | `conservative`, `base`, `aggressive` (section 4) |
-| Cost profile | `eu_small_account` for the whole grid; plus `zero_commission` for the primary scenario only, to measure fee drag |
+| Cost profile | `myinvestor` for the whole grid; plus `zero_commission` for the primary scenario only, to measure fee drag |
 
-**Primary scenario: 200 EUR / base / eu_small_account.** It is pre-registered, and it alone decides the verdict in section 10. All other scenarios are descriptive. With 18+ correlated ledgers, the best-looking one will be flattering by chance, so it is never promoted to "the result" after the fact.
+**Primary scenario: 200 EUR / base / myinvestor.** It is pre-registered, and it alone decides the verdict in section 10. All other scenarios are descriptive. With 18+ correlated ledgers, the best-looking one will be flattering by chance, so it is never promoted to "the result" after the fact.
 
 Claude sees the state of the primary scenario's A ledger (see 3.3). Other scenarios may drift from it because their constraints differ; that drift is itself measured.
 
@@ -130,17 +130,21 @@ Claude is told the **base** limits. Each scenario clips Claude's target weights 
 Stops are checked on the daily mark (stock close, and crypto at 22:00 UTC), and exits fill at the next fill window. A stop counts as approved when its entry is approved, so it never waits for a tap. This is identical for A and B.
 
 ## 5. Costs model (applied identically to A, B and C within a scenario)
-- **Ledger currency: EUR.** Instruments are priced in USD and converted with the daily ECB EUR/USD reference rate. Currency moves are part of the result, as they would be with real money.
-- **Cost profiles** (in `config/scenarios.yaml`). Every fee is `max(pct_fee × notional, min_fee)`, plus slippage:
+- **Ledger currency: EUR.** Instruments are priced in USD and converted with the daily ECB EUR/USD reference rate. This applies to all assets, including ETFs and crypto that `myinvestor` models as EUR-listed products: the USD price stays the price source, so currency moves are part of the result, as they would be with real money.
+- **Cost profiles** (in `config/scenarios.yaml`). Every commission is `min(max(pct_fee × notional, min_fee), max_fee)`, plus FX fee where it applies, plus slippage:
 
-| Parameter | zero_commission | eu_small_account |
+| Parameter | zero_commission | myinvestor |
 |---|---|---|
-| Stocks/ETFs fee | 0 bps, no minimum | **TO VERIFY** against the broker Alejandro would actually use (placeholder: 5 bps, min 1.00 EUR per order) |
-| Crypto fee | 25 bps | **TO VERIFY** (placeholder: 25 bps, min 1.00 EUR) |
-| FX conversion | 0 bps | **TO VERIFY** (placeholder: 25 bps on each EUR↔USD conversion) |
+| US stocks fee | 0%, no minimum, no maximum | 0.12% per order, min 3.00 EUR, max 25.00 EUR |
+| ETFs fee | 0%, no minimum, no maximum | 0.12% per order, min 1.00 EUR, max 25.00 EUR (modeled as EUR-listed UCITS equivalents) |
+| Crypto fee | 0.25%, no minimum, no maximum | 0.12% per order, min 1.00 EUR, max 25.00 EUR (modeled as EUR-listed ETPs) |
+| FX fee | 0% | US stocks: 0.30% on each EUR↔USD conversion; ETFs and crypto: none |
+| `etp_annual_fee_pct` (crypto only) | 0% | **TO VERIFY** per product (placeholder: 1.5%), accrued daily on the position's EUR market value |
 | Slippage | stocks 2 bps, crypto 5 bps | same |
 
-  The placeholders are deliberately pessimistic. At 200 EUR, minimum fees dominate: a 20 EUR position with a 1 EUR minimum costs 5% per side. The scenarios exist to make that visible.
+  Source for the `myinvestor` fees: myinvestor.es/inversion/broker, checked 29 Sep 2026. At 200 EUR, minimum fees dominate: a 40 EUR US-stock buy pays the 3.00 EUR minimum (7.5%) plus 0.12 EUR FX. The scenarios exist to make that visible.
+
+  `etp_annual_fee_pct` accrues daily over 365 calendar days (weekends included).
 - **LLM cost:** the daily Anthropic API cost is recorded in `api_costs`, converted to EUR, and deducted in full from **every** A and B ledger when reporting net returns. It is not split across scenarios, because a real single account would pay all of it.
 - Starting capital is set per scenario (200 / 500 / 1000 EUR).
 
@@ -172,7 +176,7 @@ Weekly (Sunday) Telegram message plus a markdown file in `reports/`:
 - **Primary scenario first**, on its own: for A, B and C, net return, annualized volatility, Sharpe, max drawdown, number of trades, win rate, average win vs average loss, total fees and total API cost as a percentage of capital.
 - A minus B for the primary scenario, which is the value of Alejandro's filter.
 - Then the scenario grid as one compact table: rows are capital × risk profile, columns are B's net return, C's net return, B − C, and fees as % of capital. The table is titled "descriptive only, not selected results".
-- Fee drag: the primary scenario under `zero_commission` vs `eu_small_account`.
+- Fee drag: the primary scenario under `zero_commission` vs `myinvestor`.
 - Approval stats: approve, reject and timeout rates, and the reject-reason breakdown.
 - API cost to date.
 - Always shown: days elapsed and a line saying that under about 120 trading days, the numbers are not evidence of skill.
@@ -186,7 +190,7 @@ Gate: `psql` shows the migrations applied; the bot answers `/ping`; the Alpaca `
 
 **Phase 1: data, ledgers and benchmark (no LLM)**
 Build ingestion for the 18 instruments plus the ECB EUR/USD rate, feature computation, `config/scenarios.yaml` loading, the fill engine, both cost profiles, daily mark-to-market, and the C benchmarks for every (capital, cost profile) pair running live.
-Gate: 5 consecutive daily runs with no gaps (`bars_daily` count per symbol matches trading days, `fx_daily` has one row per ECB business day); one C ledger reconciles by hand for one day (qty × price_usd ÷ eurusd + cash); crypto has 7 bars per week, stocks 5; a unit test shows a 20 EUR trade under `eu_small_account` paying the 1 EUR minimum, not 5 bps; adding a scenario to the YAML and restarting creates its ledgers with no code change.
+Gate: 5 consecutive daily runs with no gaps (`bars_daily` count per symbol matches trading days, `fx_daily` has one row per ECB business day); one C ledger reconciles by hand for one day (qty × price_usd ÷ eurusd + cash); crypto has 7 bars per week, stocks 5; a unit test shows a 40 EUR US-stock buy under `myinvestor` paying 3.00 EUR commission (the minimum, not 0.12%) plus 0.12 EUR FX; adding a scenario to the YAML and restarting creates its ledgers with no code change.
 
 **Phase 2: Claude proposer + validator, portfolio A only**
 Build the proposer, validation with retries, risk clipping, and A trading automatically. Telegram gets read-only proposal messages.
@@ -206,7 +210,7 @@ R makes random proposals with the same frequency, sizes and stops as A. If A can
 ## 10. Evaluation plan (pre-registered, written before any results)
 - **Months 0–3:** a learning run. Fix bugs, observe behavior, don't conclude anything about profitability.
 - **Month 6:** first real review. B's net return and Sharpe are compared with C's, and A minus B shows the filter's effect.
-- **All criteria below are evaluated on the primary scenario only** (200 EUR / base / eu_small_account). Results from other scenarios can explain *why* (for example, "fees ate the edge at 200 EUR but not at 1000 EUR"), but they can't turn a "no" into a "yes".
+- **All criteria below are evaluated on the primary scenario only** (200 EUR / base / myinvestor). Results from other scenarios can explain *why* (for example, "fees ate the edge at 200 EUR but not at 1000 EUR"), but they can't turn a "no" into a "yes".
 - **Month 12:** decision point. "Worth considering with real money" requires **all** of the following:
   1. B beats C net of all costs, including API costs.
   2. B's max drawdown is no worse than C's.
