@@ -4,13 +4,17 @@
 #   - own Postgres, no published ports (reach it with `docker compose exec`);
 #   - the bot uses Telegram long polling, so no inbound port is needed.
 #
-# Server: cd /home/avarela/tradelab && docker compose build && docker compose up -d
+# The server needs only this file and .env: the image comes from the registry
+# (TRADELAB_IMAGE, see deploy/README.md). Locally, `docker compose build` builds
+# the same image under the default tag.
 name: tradelab
 
 x-app: &app
-  image: tradelab-app:latest
+  image: ${TRADELAB_IMAGE:-tradelab-app:latest}
   build:
     context: .
+    args:
+      GIT_SHA: ${GIT_SHA:-unknown}
   env_file: .env
   environment:
     DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-tradelab}
@@ -50,6 +54,19 @@ services:
   bot:
     <<: *app
     command: ["python", "-m", "tradelab.bot"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # Daily run at 22:30 UTC (ingest, features, fills, C benchmarks, marks) and a
+  # Telegram ✅/⚠️/🔴 after each run. Manual run:
+  #   docker compose run --rm jobs python -m tradelab.jobs.daily
+  jobs:
+    <<: *app
+    command: ["python", "-m", "tradelab.scheduler"]
     depends_on:
       postgres:
         condition: service_healthy
