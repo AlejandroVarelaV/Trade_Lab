@@ -59,3 +59,10 @@ def migrated_db(empty_db):
         yield conn
     finally:
         conn.close()
+
+
+@pytest.fixture()
+def migrated_url(empty_db):
+    """URL of a fresh database with all real migrations applied."""
+    run_migrations(empty_db)
+    return empty_db
