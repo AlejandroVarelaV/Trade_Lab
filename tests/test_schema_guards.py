@@ -30,7 +30,7 @@ def proposal_id(cur):
 def scenario_id(cur):
     return _one(cur, """
         INSERT INTO scenarios (name, capital_eur, risk_profile, cost_profile, config_hash, is_primary)
-        VALUES ('primary', 200, 'base', 'eu_small_account', 'h', true) RETURNING id""")
+        VALUES ('primary', 200, 'base', 'myinvestor', 'h', true) RETURNING id""")
 
 
 def test_proposals_cannot_be_updated_or_deleted(cur, proposal_id):

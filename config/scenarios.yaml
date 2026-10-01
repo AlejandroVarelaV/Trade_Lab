@@ -1,0 +1,81 @@
+# TradeLab scenario grid, risk profiles and cost profiles (SPEC v2 §1.1, §4, §5).
+#
+# Read on every daily run. Adding or removing a scenario is a config change, not
+# a code change: the next run creates the new scenario's A and B ledgers (and its
+# C benchmark if its (capital, cost profile) pair is new), and deactivates the
+# ones that are gone. Changing any parameter of an existing scenario changes its
+# config_hash, which deactivates the old row and starts a new one: scenarios
+# are never edited in place.
+#
+# Units: every *_pct is a fraction (0.0012 = 0.12%); amounts are EUR; slippage
+# is in basis points.
+version: 1
+
+# Strategy scenarios = grid (cartesian product) + the explicit list below.
+# Names are generated as c<capital>_<risk>_<cost> unless `name` is given.
+grid:
+  capital_eur: [200, 500, 1000]
+  risk_profile: [conservative, base, aggressive]
+  cost_profile: [myinvestor]
+
+scenarios:
+  # Fee drag (SPEC §8): the primary scenario under zero_commission.
+  - {capital_eur: 200, risk_profile: base, cost_profile: zero_commission}
+
+# Pre-registered (SPEC §1.1, §10). Only this scenario decides the verdict.
+primary: c200_base_myinvestor
+
+rules:
+  min_trade_eur: 10          # smaller trades are skipped as below_min_size
+
+# Portfolio C: one ledger per (capital, cost profile) pair in use.
+benchmark:
+  weights: {SPY: 0.80, BTC/USD: 0.20}
+  rebalance: monthly         # first run of each calendar month (UTC), plus inception
+
+risk_profiles:
+  conservative:
+    max_weight: 0.10
+    max_crypto_weight: 0.10
+    max_positions: 4
+    max_new_per_day: 2
+    stop_min_pct: 0.03
+    stop_max_pct: 0.08
+    kill_switch_drawdown: 0.10
+  base:
+    max_weight: 0.20
+    max_crypto_weight: 0.20
+    max_positions: 6
+    max_new_per_day: 3
+    stop_min_pct: 0.03
+    stop_max_pct: 0.15
+    kill_switch_drawdown: 0.15
+  aggressive:
+    max_weight: 0.35
+    max_crypto_weight: 0.40
+    max_positions: 8
+    max_new_per_day: 4
+    stop_min_pct: 0.05
+    stop_max_pct: 0.20
+    kill_switch_drawdown: 0.25
+
+# commission = min(max(pct × notional, min), max); max: null means no maximum.
+cost_profiles:
+  zero_commission:
+    commission:
+      stock:  {pct: 0.0,    min: 0.0, max: null}
+      etf:    {pct: 0.0,    min: 0.0, max: null}
+      crypto: {pct: 0.0025, min: 0.0, max: null}
+    fx_fee_pct: {stock: 0.0, etf: 0.0, crypto: 0.0}
+    etp_annual_fee_pct: 0.0
+    slippage_bps: {stock: 2, etf: 2, crypto: 5}
+
+  # Source: myinvestor.es/inversion/broker, checked 29 Sep 2026 (SPEC §5).
+  myinvestor:
+    commission:
+      stock:  {pct: 0.0012, min: 3.00, max: 25.00}
+      etf:    {pct: 0.0012, min: 1.00, max: 25.00}   # modeled as EUR-listed UCITS
+      crypto: {pct: 0.0012, min: 1.00, max: 25.00}   # modeled as EUR-listed ETPs
+    fx_fee_pct: {stock: 0.003, etf: 0.0, crypto: 0.0}  # on each EUR<->USD conversion
+    etp_annual_fee_pct: 0.015   # TO VERIFY per product; accrued daily over 365 days
+    slippage_bps: {stock: 2, etf: 2, crypto: 5}
