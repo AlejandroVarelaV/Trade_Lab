@@ -1,0 +1,5 @@
+# Runtime dependencies (pinned). Keep in sync with the Docker image.
+httpx==0.28.1
+psycopg2-binary==2.9.13
+python-telegram-bot==22.8
+PyYAML==6.0.3
