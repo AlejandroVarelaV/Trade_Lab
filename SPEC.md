@@ -246,7 +246,7 @@ Gate: one weekly report generated from real data; a simulated missing-bar failur
 R makes random proposals with the same frequency, sizes and stops as A. If A can't beat R, Claude is adding noise, not insight.
 
 ## 10. Evaluation plan (pre-registered, written before any results)
-- **Start date = first daily job_run on the production server.** Every month below counts from it; runs on any other machine don't count.
+- **Start date = first daily job_run on the production server with the proposer (Phase 2) and the approval flow (Phase 3) both live.** At that run, every scenario is re-created (new config_hash generation) so A, B and C all start from their capital on the same day. Ledgers from earlier phases are test data and are never reported.
 - **Months 0–3:** a learning run. Fix bugs, observe behavior, don't conclude anything about profitability.
 - **Month 6:** first real review. B's net return and Sharpe are compared with C's, and A minus B shows the filter's effect.
 - **All criteria below are evaluated on the primary scenario only** (200 EUR / base / ibkr). Results from other scenarios, including the broker comparison, can explain *why* (for example, "fees ate the edge at 200 EUR but not at 1000 EUR", or "it only works under the `zero_commission` reference"), but they can't turn a "no" into a "yes". `zero_commission` is a reference, not a broker, so a result that only holds there is a "no".
