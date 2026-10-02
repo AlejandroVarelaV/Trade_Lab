@@ -13,3 +13,8 @@ On the server the file is baked into the image, so a change ships as a new image
 (see `deploy/README.md`). `TRADELAB_SCENARIOS` can point to another file.
 
 The `primary` scenario is pre-registered (SPEC §10): don't change it after the start.
+
+`zero_commission` is a fee-free **reference, not a real broker**: it exists to
+measure fee drag and must be labeled that way wherever it's reported. Values
+marked `TO VERIFY` are placeholders; each cost profile names its source and the
+date it was checked.

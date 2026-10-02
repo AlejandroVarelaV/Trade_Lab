@@ -1,6 +1,6 @@
 # TradeLab — Claude as a paper-trading analyst, with a human in the loop
 
-Status: spec v2 (29 Sep 2026): realistic capital in EUR, scenario grid, cost profiles. Paper money only. No real orders, ever, in this version.
+Status: spec v3 (1 Oct 2026): five cost profiles over the full scenario grid, primary scenario on `ibkr`, fee engine with per-share fees, fractional flags, free orders, spreads and interest on cash. (v2, 29 Sep 2026: realistic capital in EUR, scenario grid, cost profiles.) Paper money only. No real orders, ever, in this version.
 
 ## 1. What this is and what question it answers
 
@@ -17,15 +17,17 @@ The project succeeds if it produces a trustworthy answer, including "no". Making
 ### 1.1 Scenarios (added in v2)
 Claude is called **once per day**. Its output is a set of target weights. Every **scenario** replays those same weights (and, for B, the same approval decisions) through its own capital, risk profile and cost profile. Scenarios cost no extra API calls.
 
-Scenarios live in `config/scenarios.yaml`. Adding or removing one is a config change plus a restart, not a code change. Each scenario gets its own A and B ledgers, plus a C benchmark per (capital, cost profile) pair. Default grid:
+Scenarios live in `config/scenarios.yaml`. Adding or removing one is a config change plus a restart, not a code change. Each scenario gets its own A and B ledgers, plus a C benchmark per (capital, cost profile) pair. Default layout, the full grid for every cost profile:
 
 | Dimension | Values |
 |---|---|
 | Capital (EUR) | 200, 500, 1000 |
 | Risk profile | `conservative`, `base`, `aggressive` (section 4) |
-| Cost profile | `myinvestor` for the whole grid; plus `zero_commission` for the primary scenario only, to measure fee drag |
+| Cost profile (section 5) | `ibkr`, `trade_republic`, `revolut_standard`, `myinvestor`, and `zero_commission`, a fee-free **reference, not a real broker**, kept to measure fee drag |
 
-**Primary scenario: 200 EUR / base / myinvestor.** It is pre-registered, and it alone decides the verdict in section 10. All other scenarios are descriptive. With 18+ correlated ledgers, the best-looking one will be flattering by chance, so it is never promoted to "the result" after the fact.
+That is 3 × 3 × 5 = **45 strategy scenarios** (A and B each), plus one C benchmark per (capital, cost profile) pair = **15 benchmark ledgers**: 105 ledgers in total.
+
+**Primary scenario: 200 EUR / base / ibkr** (`c200_base_ibkr`). It is pre-registered, and it alone decides the verdict in section 10. All other scenarios, including the other brokers at 200 EUR / base, are descriptive. With 105 correlated ledgers, the best-looking one will be flattering by chance, so it is never promoted to "the result" after the fact.
 
 Claude sees the state of the primary scenario's A ledger (see 3.3). Other scenarios may drift from it because their constraints differ; that drift is itself measured.
 
@@ -130,21 +132,58 @@ Claude is told the **base** limits. Each scenario clips Claude's target weights 
 Stops are checked on the daily mark (stock close, and crypto at 22:00 UTC), and exits fill at the next fill window. A stop counts as approved when its entry is approved, so it never waits for a tap. This is identical for A and B.
 
 ## 5. Costs model (applied identically to A, B and C within a scenario)
-- **Ledger currency: EUR.** Instruments are priced in USD and converted with the daily ECB EUR/USD reference rate. This applies to all assets, including ETFs and crypto that `myinvestor` models as EUR-listed products: the USD price stays the price source, so currency moves are part of the result, as they would be with real money.
-- **Cost profiles** (in `config/scenarios.yaml`). Every commission is `min(max(pct_fee × notional, min_fee), max_fee)`, plus FX fee where it applies, plus slippage:
+- **Ledger currency: EUR.** Instruments are priced in USD and converted with the daily ECB EUR/USD reference rate. This applies to all assets, including ETFs and crypto that `ibkr` and `myinvestor` model as EUR-listed products: the USD price stays the price source, so currency moves are part of the result, as they would be with real money.
+- **Fee engine.** For each order, per asset class of the cost profile:
+  - **Commission** = `clamp(pct × notional + per_share × qty, min, max)`. Each fee schedule has a **currency**: EUR, or USD (IBKR US stocks), which is converted to EUR at the fill's ECB rate. The maximum is an absolute amount and/or a **% of trade value**; if both are set the lower applies, and the maximum is applied after the minimum, so on a tiny trade it wins (IBKR's 1% cap).
+  - **FX fee**: a % of the notional on each EUR↔USD conversion, once per order, where the profile charges one.
+  - **FX allowance**: `fx_free_eur_per_month` per profile. Conversions (fills in asset classes with an FX fee, buys and sells) are summed in EUR per UTC calendar month **in each ledger**, and the FX fee applies only to the part above the allowance. It resets at the start of every month, like free orders.
+  - **Slippage + spread**: `slippage_bps + spread_bps` move the execution price against us, on buys and sells.
+  - **Fractional shares**: a per-asset-class flag. When it's false, buys (and partial sells) round down to whole shares, and an order under one share is skipped and logged as `below_one_share`.
+  - **Free orders**: `free_orders_per_month` per profile, for the asset classes it lists. The first N fills of each UTC calendar month **in each ledger** pay no commission (the FX fee still applies). The counter resets at the start of every month.
+  - **Interest on cash**: `cash_interest_annual_pct`, accrued daily over 365 calendar days (weekends included) on positive cash, from the day after the ledger starts, and stored in `accruals_daily` with kind `interest`. It applies identically to A, B and C.
+- **Cost profiles** (in `config/scenarios.yaml`, each with its source and check date in a comment):
 
-| Parameter | zero_commission | myinvestor |
-|---|---|---|
-| US stocks fee | 0%, no minimum, no maximum | 0.12% per order, min 3.00 EUR, max 25.00 EUR |
-| ETFs fee | 0%, no minimum, no maximum | 0.12% per order, min 1.00 EUR, max 25.00 EUR (modeled as EUR-listed UCITS equivalents) |
-| Crypto fee | 0.25%, no minimum, no maximum | 0.12% per order, min 1.00 EUR, max 25.00 EUR (modeled as EUR-listed ETPs) |
-| FX fee | 0% | US stocks: 0.30% on each EUR↔USD conversion; ETFs and crypto: none |
-| `etp_annual_fee_pct` (crypto only) | 0% | **TO VERIFY** per product (placeholder: 1.5%), accrued daily on the position's EUR market value |
-| Slippage | stocks 2 bps, crypto 5 bps | same |
+| Parameter | ibkr | trade_republic | revolut_standard | myinvestor | zero_commission (reference) |
+|---|---|---|---|---|---|
+| US stocks fee | USD 0.0035/share, min USD 0.35, max 1% of trade value | EUR 1.00 flat (**TO VERIFY**) | 1 free order/month, then max(0.25%, EUR 1.00) | 0.12%, min EUR 3.00, max EUR 25.00 | 0% |
+| ETFs fee | 0.05%, min EUR 1.25, max EUR 29 (Xetra-listed) | EUR 1.00 flat (**TO VERIFY**) | as US stocks (shares the free order) | 0.12%, min EUR 1.00, max EUR 25.00 (EUR-listed UCITS) | 0% |
+| Crypto fee | 0.05%, min EUR 1.25, max EUR 29 (Xetra-listed ETP) | EUR 1.00 flat (**TO VERIFY**) | 1.49%, min EUR 1.00 (**TO VERIFY**, unverified placeholder) | 0.12%, min EUR 1.00, max EUR 25.00 (EUR-listed ETP) | 0.25% |
+| FX fee | US stocks 0.03%; none on ETFs, crypto | US stocks 0.35% (**TO VERIFY**) | US stocks: first EUR 1,000/month free, then 0.5% (stock trades assumed to use the allowance: **TO VERIFY**); none on ETFs (EUR-listed), crypto | US stocks 0.30%; none on ETFs, crypto | 0% |
+| Spread | 0 | crypto 100 bps (**TO VERIFY**) | 0 | 0 | 0 |
+| Slippage | stocks/ETFs 2 bps, crypto 5 bps | same | same | same | same |
+| Fractional | yes (min USD 1) | yes | yes | ETFs and crypto yes, **US stocks no** | yes |
+| `etp_annual_fee_pct` (crypto) | **TO VERIFY** (placeholder 1.5%) | 0 (crypto held directly) | 0 | **TO VERIFY** (placeholder 1.5%) | 0 |
+| Cash interest | 0 | 2.3% (**TO VERIFY**) | 0 (not modeled) | 0 | 0 |
 
-  Source for the `myinvestor` fees: myinvestor.es/inversion/broker, checked 29 Sep 2026. At 200 EUR, minimum fees dominate: a 40 EUR US-stock buy pays the 3.00 EUR minimum (7.5%) plus 0.12 EUR FX. The scenarios exist to make that visible.
+  Sources, all checked 2026-10-01:
+  - `ibkr`: interactivebrokers.ie: the commissions-stocks page, the fractional-trading page ("IE: Fractional shares are available for all account types", minimum USD 1), and the EU US-stock cost page.
+  - `trade_republic`: curvo.eu and brokerchooser.com reviews; the official traderepublic.com pricing page did not load. The EUR 1 fee, 0.35% FX, 1% crypto spread and 2.3% interest are **from reviews, TO VERIFY on traderepublic.com**.
+  - `revolut_standard`: help.revolut.com (en-FI) trading fees and currency exchange fees, Standard plan. The weekend FX markup is ignored: fills are on weekdays, and Revolut crypto is in EUR. Crypto 1.49% is an **unverified placeholder**.
+  - `myinvestor`: myinvestor.es/inversion/broker (unchanged from 29 Sep 2026).
+  - `zero_commission` has no source: it's synthetic, a reference and never a broker recommendation.
 
-  `etp_annual_fee_pct` accrues daily over 365 calendar days (weekends included).
+  Every **TO VERIFY** value is a placeholder that must be checked before results are read; changing it later creates new scenario rows (section 7).
+
+  `etp_annual_fee_pct` accrues daily over 365 calendar days (weekends included) on the position's EUR market value.
+
+- **Worked example: a 40 EUR US-stock buy** at EUR/USD 1.10 (commission + FX fee; slippage and spread come on top in the price):
+
+| Profile | Commission | FX fee | Total | % of trade |
+|---|---|---|---|---|
+| ibkr | USD 0.35 minimum = 0.32 EUR | 0.012 EUR | **0.33 EUR** | 0.8% |
+| trade_republic | 1.00 EUR | 0.14 EUR | **1.14 EUR** | 2.9% |
+| revolut_standard | 1.00 EUR (0.00 for the month's free order) | 0 (within the EUR 1,000 monthly allowance) | **1.00 EUR** (0 free) | 2.5% (0%) |
+| myinvestor | 3.00 EUR minimum (not 0.12% = 0.05 EUR) | 0.12 EUR | **3.12 EUR** | 7.8% |
+| zero_commission | 0 | 0 | **0** | 0% |
+
+  Under `myinvestor` that order never fills in practice: every stock in the universe trades above about 44 USD, so 40 EUR is less than one share and the order is skipped as `below_one_share`. At 200 EUR, minimum fees and whole shares dominate. The broker comparison exists to make that visible.
+- **Known biases** (they apply to every profile and to A, B and C alike unless stated):
+  - **No dividends credited.** Prices are raw, not total-return, so dividends are missing for stocks, ETFs and the C benchmark (80% SPY).
+  - **Interest only where modeled.** Only `trade_republic` earns interest on cash. Real interest elsewhere (for example IBKR on larger balances, or a Revolut savings pocket) is ignored, which favors `trade_republic` relative to the others. Interest is credited daily and compounds daily, while brokers pay monthly; the difference is negligible at these rates.
+  - **Exchange, clearing and regulatory pass-through fees** (IBKR Tiered) are not modeled, so `ibkr` is slightly optimistic.
+  - **Values marked TO VERIFY** are unverified placeholders or come from third-party reviews (`trade_republic`), not the broker's own pricing page.
+  - **Spread** is a fixed number of bps, not the live quoted spread.
+  - **Free orders and the FX allowance** are counted by UTC calendar month, and the broker's own month boundary may differ.
 - **LLM cost:** the daily Anthropic API cost is recorded in `api_costs`, converted to EUR, and deducted in full from **every** A and B ledger when reporting net returns. It is not split across scenarios, because a real single account would pay all of it.
 - Starting capital is set per scenario (200 / 500 / 1000 EUR).
 
@@ -172,11 +211,10 @@ Stops are checked on the daily mark (stock close, and crypto at 22:00 UTC), and 
 Everything is append-only except the daily snapshots. A proposal is written **before** any outcome exists, and its timestamp is the proof.
 
 ## 8. Reporting
-Weekly (Sunday) Telegram message plus a markdown file in `reports/`:
-- **Primary scenario first**, on its own: for A, B and C, net return, annualized volatility, Sharpe, max drawdown, number of trades, win rate, average win vs average loss, total fees and total API cost as a percentage of capital.
-- A minus B for the primary scenario, which is the value of Alejandro's filter.
-- Then the scenario grid as one compact table: rows are capital × risk profile, columns are B's net return, C's net return, B − C, and fees as % of capital. The table is titled "descriptive only, not selected results".
-- Fee drag: the primary scenario under `zero_commission` vs `myinvestor`.
+Weekly (Sunday) Telegram message plus a markdown file in `reports/`, always in this order:
+1. **The primary scenario alone** (200 EUR / base / ibkr): for A, B and C, net return, annualized volatility, Sharpe, max drawdown, number of trades, win rate, average win vs average loss, total fees and total API cost as a percentage of capital; then A minus B, which is the value of Alejandro's filter.
+2. **Broker comparison at 200 EUR / base**: one row per cost profile (`ibkr`, `trade_republic`, `revolut_standard`, `myinvestor`, `zero_commission`). Columns: B's net return, C's net return, B − C, fees (commission + FX) as % of capital, interest earned, and orders skipped as `below_one_share`. The `zero_commission` row is labeled "reference, not a broker"; the gap between it and `ibkr` is the primary scenario's fee drag.
+3. **Appendix: the full grid**, titled "descriptive only, not selected results": every (capital, risk, cost profile) scenario with the same columns as (2).
 - Approval stats: approve, reject and timeout rates, and the reject-reason breakdown.
 - API cost to date.
 - Always shown: days elapsed and a line saying that under about 120 trading days, the numbers are not evidence of skill.
@@ -208,9 +246,10 @@ Gate: one weekly report generated from real data; a simulated missing-bar failur
 R makes random proposals with the same frequency, sizes and stops as A. If A can't beat R, Claude is adding noise, not insight.
 
 ## 10. Evaluation plan (pre-registered, written before any results)
+- **Start date = first daily job_run on the production server.** Every month below counts from it; runs on any other machine don't count.
 - **Months 0–3:** a learning run. Fix bugs, observe behavior, don't conclude anything about profitability.
 - **Month 6:** first real review. B's net return and Sharpe are compared with C's, and A minus B shows the filter's effect.
-- **All criteria below are evaluated on the primary scenario only** (200 EUR / base / myinvestor). Results from other scenarios can explain *why* (for example, "fees ate the edge at 200 EUR but not at 1000 EUR"), but they can't turn a "no" into a "yes".
+- **All criteria below are evaluated on the primary scenario only** (200 EUR / base / ibkr). Results from other scenarios, including the broker comparison, can explain *why* (for example, "fees ate the edge at 200 EUR but not at 1000 EUR", or "it only works under the `zero_commission` reference"), but they can't turn a "no" into a "yes". `zero_commission` is a reference, not a broker, so a result that only holds there is a "no".
 - **Month 12:** decision point. "Worth considering with real money" requires **all** of the following:
   1. B beats C net of all costs, including API costs.
   2. B's max drawdown is no worse than C's.
@@ -229,5 +268,5 @@ R makes random proposals with the same frequency, sizes and stops as A. If A can
 - Show evidence for every gate: the exact command plus its output. Prefer outputs that return counts or booleans over copied strings.
 - Never place orders anywhere except the Alpaca **paper** endpoint (`paper-api.alpaca.markets`). Hard-fail at startup if the configured base URL is anything else.
 - Keep secrets in `.env`, which is gitignored. Commit a `.env.example`.
-- Don't run git commands. Alejandro makes all commits himself. Propose commit boundaries and messages in conventional format, in English.
+- Read-only git (status, diff, log) is allowed; anything that writes is Alejandro's. Propose commit boundaries and messages in conventional format, in English.
 - Don't touch anything in the STAIR repo or the `stair` compose project on the server.

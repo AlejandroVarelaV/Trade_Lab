@@ -1,6 +1,6 @@
 # TradeLab
 
-Claude as a paper-trading analyst with a human in the loop. Full spec: `SPEC.md` (v2).
+Claude as a paper-trading analyst with a human in the loop. Full spec: `SPEC.md` (v3).
 **Paper money only.** Every entrypoint refuses to start unless `ALPACA_BASE_URL` is
 `https://paper-api.alpaca.markets`.
 
@@ -15,7 +15,7 @@ Claude as a paper-trading analyst with a human in the loop. Full spec: `SPEC.md`
 | `tradelab/checks/alpaca.py` | Phase 0 gate check for the Alpaca paper account |
 | `config/scenarios.yaml` | Scenario grid, risk and cost profiles, benchmark (see `config/README.md`) |
 | `tradelab/config.py` | Loads/validates the YAML, resolves scenarios, computes `config_hash` |
-| `tradelab/costs.py` | Commission `min(max(pct × notional, min), max)`, FX fee, slippage, ETP fee |
+| `tradelab/costs.py` | Commission `clamp(pct × notional + per_share × qty, min, max)` in EUR or USD, FX fee, slippage + spread, fractional flags, free orders, ETP fee, interest on cash |
 | `tradelab/calendars.py` | Crypto 22:00-UTC days, fill windows, ECB/TARGET business days |
 | `tradelab/data/` | Alpaca (IEX daily, crypto hourly→daily, 1-min fill price, calendar), ECB, upsert + gap detection |
 | `tradelab/features.py` | §3.3 features → `features_daily` (NULL when not computable) |
@@ -39,7 +39,7 @@ Claude as a paper-trading analyst with a human in the loop. Full spec: `SPEC.md`
 ## Phase 0 gate commands (run on the server, in /home/avarela/tradelab)
 
 ```bash
-# 1. Migrations applied (expect after Phase 1: 2|t, then 18)
+# 1. Migrations applied (expect now: 3|t, then 18)
 docker compose exec -T postgres psql -U tradelab -d tradelab -tA <<'SQL'
 SELECT count(*), bool_and(sha256 ~ '^[0-9a-f]{64}$') FROM schema_migrations;
 SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public';
@@ -66,7 +66,7 @@ waiting orders) / 🔴 (exception, or a ledger can't be marked for the latest da
 
 Ledgers: each strategy scenario has A and B (cash only until Phase 2); C is one
 ledger per (capital, cost profile) pair, stored as a `kind = 'benchmark'`
-scenario (`bench_c200_myinvestor`, ...). C is 80% SPY / 20% BTC, decided at
+scenario (`bench_c200_ibkr`, ...). C is 80% SPY / 20% BTC, decided at
 inception and on the first run of each month, filled by the same engine as A/B.
 
 ```bash
@@ -105,8 +105,11 @@ SQL
   stock/ETF move over 25% with ⚠️. Splits need manual handling.
 - **IEX feed.** Volume is IEX-only (a few % of the consolidated tape); the volume
   z-score is still comparable over time. The open is IEX's first trade.
-- **Fractional quantities.** 200 EUR can't buy one SPY share; the ledger assumes
-  fractional units, as the EUR-listed products being modeled would need.
+- **Fractional quantities** are a per-profile flag (SPEC §5). Where it's off
+  (`myinvestor` US stocks), buys round down to whole shares and an order under
+  one share is skipped as `below_one_share`.
+- **Interest on cash** is credited daily where the profile models it
+  (`trade_republic`), as `accruals_daily` rows with kind `interest`, symbol `EUR`.
 - **FX at fills** uses the ECB rate of the fill day (published ~14:00 UTC, a
   little after the 12:00/13:30 fills). Weekends use the last ECB rate.
 - **ETP fee** is debited from cash daily, so a fully invested ledger can show a
