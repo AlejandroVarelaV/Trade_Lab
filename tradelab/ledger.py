@@ -9,18 +9,25 @@ Rules (SPEC §3.2, §4, §5), identical for A, B and C:
     filled symbol at its fill price and every other position at the previous
     day's close. Sells run before buys; a buy is capped by available cash.
   - Trades under min_trade_eur are skipped (`below_min_size`), except a full
-    close (target 0).
+    close (target 0). Where the cost profile has no fractional shares for the
+    asset class, quantities round down to whole shares and an order under one
+    share is skipped (`below_one_share`).
+  - Free orders (cost profile `free_orders_per_month`) are the first fills of
+    each UTC calendar month in that ledger, counted per ledger. The FX
+    allowance (`fx_free_eur_per_month`) is counted the same way, in EUR of
+    converting fills (asset classes with an FX fee, buys and sells).
   - Ledger currency is EUR: price_eur = price_usd / eurusd (ECB, as of the day).
 
 The ledger state is never stored as a running balance: cash and positions are
-re-derived from `fills` (append-only) and the ETP fee accruals every run, so a
-corrected bar repairs every snapshot that depends on it. A snapshot whose
+re-derived from `fills` (append-only) and the daily accruals (ETP fee, cash
+interest) every run, so a corrected bar repairs every snapshot that depends on it. A snapshot whose
 inputs are missing is not written (no forward fill); weekends and holidays are
 marked at the last session's close, since no new price exists.
 """
 from __future__ import annotations
 
 import bisect
+import math
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
@@ -34,6 +41,7 @@ from tradelab.config import Config
 from tradelab.costs import CostProfile
 
 EPS_QTY = 1e-9
+CASH_SYMBOL = "EUR"   # accruals_daily.symbol for interest on cash
 CryptoPriceFn = Callable[[str, datetime, datetime], "tuple[datetime, float] | None"]
 
 
@@ -162,7 +170,7 @@ class DayMark:
     positions: dict[str, float]
     cost_basis: dict[str, float]
     values: dict[str, float | None]
-    accruals: dict[str, tuple[float, float]] = field(default_factory=dict)
+    accruals: list[tuple[str, str, float, float]] = field(default_factory=list)  # symbol, kind, base, amount
 
     @property
     def equity(self) -> float | None:
@@ -174,8 +182,11 @@ class DayMark:
 def walk(ledger: Ledger, fills: list[Fill], market: Market, through: date) -> list[DayMark]:
     """Replay the ledger day by day from its start date to `through`.
 
-    cash becomes None for good once an ETP accrual can't be computed (its base
-    price is missing), because every later balance depends on it.
+    Each calendar day, after that day's fills: the ETP fee is debited on each
+    crypto position, then interest is credited on positive cash from the day
+    after the start date (both over 365 calendar days, weekends included). cash becomes None for good once an ETP
+    accrual can't be computed (its base price is missing), because every later
+    balance depends on it.
     """
     cash: float | None = ledger.capital
     pos: dict[str, float] = {}
@@ -213,8 +224,13 @@ def walk(ledger: Ledger, fills: list[Fill], market: Market, through: date) -> li
                     cash = None
                     break
                 fee = ledger.cost.etp_daily_fee(cls, v)
-                mark.accruals[sym] = (v, fee)
+                mark.accruals.append((sym, "etp_fee", v, fee))
                 cash -= fee
+            if cash is not None and d > ledger.start_date:   # inception day is marked at capital
+                interest = ledger.cost.daily_interest(cash)
+                if interest:
+                    mark.accruals.append((CASH_SYMBOL, "interest", cash, interest))
+                    cash += interest
             mark.cash = cash
         marks.append(mark)
     return marks
@@ -311,36 +327,47 @@ def _fill_group(cur, ledger, window, orders, fills, market, cfg, crypto_price, r
         plans.append((oid, sym, tw, tw * equity - current))
     plans.sort(key=lambda p: p[3])          # sells (negative delta) first
 
+    def skip(oid, sym, why, detail=""):
+        _resolve(cur, oid, "skipped", why, market.t)
+        report["skipped"].append(f"{ledger.name}/{ledger.portfolio} {sym} {why}{detail}")
+
     for oid, sym, tw, delta in plans:
         cls = market.asset_class[sym]
         ts, ref_usd = ref[sym]
         held = pos.get(sym, 0.0)
         full_close = tw == 0 and held > EPS_QTY
+        whole = not ledger.cost.fractional[cls]
+        free = (ledger.cost.is_free_eligible(cls)
+                and _free_orders_used(fills, market, ledger.cost, ts) < ledger.cost.free_orders_per_month)
+        fx_used = _fx_converted_eur(fills, market, ledger.cost, ts)
         note = None
         if abs(delta) < cfg.min_trade_eur and not full_close:
-            _resolve(cur, oid, "skipped", "below_min_size", market.t)
-            report["skipped"].append(f"{ledger.name}/{ledger.portfolio} {sym} below_min_size "
-                                     f"(delta {delta:+.2f} EUR)")
+            skip(oid, sym, "below_min_size", f" (delta {delta:+.2f} EUR)")
             continue
         if delta < 0:
             side = "sell"
             exec_usd = ledger.cost.exec_price(cls, ref_usd, "sell")
             qty = held if full_close else min(held, -delta * fx / ref_usd)
-            qty_d = _q(qty, 10, ROUND_DOWN)
+            qty_d = _q(math.floor(qty + EPS_QTY) if whole and not full_close else qty, 10, ROUND_DOWN)
         else:
             side = "buy"
             exec_usd = ledger.cost.exec_price(cls, ref_usd, "buy")
-            notional = min(delta, ledger.cost.max_affordable_notional(cls, cash))
+            notional = min(delta, ledger.cost.max_affordable_notional(
+                cls, cash, fx_rate=fx, price_usd=exec_usd, free=free, fx_used_eur=fx_used))
             if notional < cfg.min_trade_eur:
-                _resolve(cur, oid, "skipped", "insufficient_cash", market.t)
-                report["skipped"].append(f"{ledger.name}/{ledger.portfolio} {sym} insufficient_cash")
+                skip(oid, sym, "insufficient_cash")
                 continue
             if notional < delta - 0.005:
                 note = f"cash_limited: {notional:.2f} of {delta:.2f} EUR"
-            qty_d = _q(notional * fx / exec_usd, 10, ROUND_DOWN)
+            qty = notional * fx / exec_usd
+            qty_d = _q(math.floor(qty) if whole else qty, 10, ROUND_DOWN)
+        if whole and qty_d < 1:
+            skip(oid, sym, "below_one_share", f" ({qty:.4f} shares)")
+            continue
         price_d, fx_d = _q(exec_usd, 8), _q(fx, 6)
         gross = float(qty_d * price_d / fx_d)
-        tc = ledger.cost.trade_cost(cls, gross)
+        tc = ledger.cost.trade_cost(cls, gross, fx_rate=float(fx_d), price_usd=float(price_d),
+                                    free=free, fx_used_eur=fx_used)
         comm_d, fxfee_d = _q(tc.commission_eur, 4), _q(tc.fx_fee_eur, 4)
         cur.execute("""
             INSERT INTO fills (scenario_id, portfolio, proposal_id, fill_reason, symbol, side, qty,
@@ -358,7 +385,32 @@ def _fill_group(cur, ledger, window, orders, fills, market, cfg, crypto_price, r
         pos[sym] = held + (f.qty if side == "buy" else -f.qty)
         report["filled"].append(f"{ledger.name}/{ledger.portfolio} {side} {f.qty:.6f} {sym} "
                                 f"@ {f.price_usd:.2f} USD, fees {f.fees_eur:.2f} EUR"
+                                + (" (free order)" if free else "")
                                 + (f" ({note})" if note else ""))
+
+
+def _free_orders_used(fills: list[Fill], market: Market, cost: CostProfile, instant: datetime) -> int:
+    """Free-order-eligible fills of this ledger in instant's UTC calendar month, up to instant."""
+    t = instant.astimezone(UTC)
+    n = 0
+    for f in fills:
+        ft = f.filled_at.astimezone(UTC)
+        if (ft.year, ft.month) == (t.year, t.month) and ft <= t \
+                and cost.is_free_eligible(market.asset_class[f.symbol]):
+            n += 1
+    return n
+
+
+def _fx_converted_eur(fills: list[Fill], market: Market, cost: CostProfile, instant: datetime) -> float:
+    """EUR converted by this ledger's fills in instant's UTC calendar month, up to instant."""
+    t = instant.astimezone(UTC)
+    total = 0.0
+    for f in fills:
+        ft = f.filled_at.astimezone(UTC)
+        if (ft.year, ft.month) == (t.year, t.month) and ft <= t \
+                and cost.converts(market.asset_class[f.symbol]):
+            total += f.qty * f.price_usd / f.fx_rate
+    return total
 
 
 def _resolve(cur, order_id: int, status: str, note: str | None, t: datetime) -> None:
@@ -418,8 +470,8 @@ def mark_all(cur, ledgers: list[Ledger], market: Market) -> dict:
             for sym, q in m.positions.items():
                 pos_rows.append((lg.scenario_id, lg.portfolio, m.date, sym, q,
                                  m.cost_basis[sym] / q, round(m.values[sym], 4), None))
-            for sym, (base, amount) in m.accruals.items():
-                acc_rows.append((lg.scenario_id, lg.portfolio, m.date, sym, "etp_fee",
+            for sym, kind, base, amount in m.accruals:
+                acc_rows.append((lg.scenario_id, lg.portfolio, m.date, sym, kind,
                                  round(base, 4), round(amount, 6)))
         if eq_rows:
             execute_values(cur, "INSERT INTO equity_daily (scenario_id, portfolio, date, equity_eur,"

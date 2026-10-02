@@ -53,12 +53,12 @@ def test_first_run_creates_all_ledgers_and_c_orders(env):
     status, s = env.run(MON, backfill=True)
     assert status in ("ok", "warn"), s
     rows = env.q("SELECT kind, count(*) FROM scenarios WHERE active_to IS NULL GROUP BY kind")
-    assert dict(rows) == {"strategy": 10, "benchmark": 4}
-    assert env.q("SELECT count(DISTINCT config_hash) FROM scenarios")[0][0] == 14
-    # 10 × (A, B) + 4 × C = 24 ledgers, each marked at capital on day one.
+    assert dict(rows) == {"strategy": 45, "benchmark": 15}
+    assert env.q("SELECT count(DISTINCT config_hash) FROM scenarios")[0][0] == 60
+    # 45 × (A, B) + 15 × C = 105 ledgers, each marked at capital on day one.
     eq = env.q("SELECT portfolio, count(*), bool_and(equity_eur = s.capital_eur) FROM equity_daily e"
                " JOIN scenarios s ON s.id = e.scenario_id GROUP BY portfolio ORDER BY 1")
-    assert eq == [("A", 10, True), ("B", 10, True), ("C", 4, True)]
+    assert eq == [("A", 45, True), ("B", 45, True), ("C", 15, True)]
     orders = env.q("SELECT symbol, target_weight::float8, fill_window FROM orders"
                    " WHERE scenario_id = %s ORDER BY symbol", (_ledger_id(env, "bench_c200_myinvestor"),))
     assert orders == [
@@ -112,21 +112,96 @@ def test_c_fills_and_reconciles_by_hand(env):
     assert env.q("SELECT count(*) FROM accruals_daily WHERE scenario_id = %s", (zid,))[0][0] == 0
 
 
-def test_40_eur_us_stock_buy_through_the_fill_engine(env):
-    env.run(MON, backfill=True)
-    sid = _ledger_id(env, "c200_base_myinvestor")
+def _order(env, scenario, symbol, weight, decided: date, window: datetime, portfolio="A"):
     env.q("""INSERT INTO orders (scenario_id, portfolio, reason, symbol, target_weight,
                                  decided_at, fill_window)
-             VALUES (%s, 'A', 'rebalance', 'AAPL', 0.2, %s, %s) RETURNING id""",
-          (sid, daily_run_time(MON), datetime(2026, 9, 22, 13, 30, tzinfo=UTC)))
+             VALUES (%s, %s, 'rebalance', %s, %s, %s, %s) RETURNING id""",
+          (_ledger_id(env, scenario), portfolio, symbol, weight, daily_run_time(decided), window))
     env.conn.commit()
+
+
+def _fills(env, scenario, portfolio="A"):
+    return env.q("SELECT symbol, qty::float8, price_usd::float8, fx_rate::float8,"
+                 " commission_eur::float8, fx_fee_eur::float8, fees_eur::float8 FROM fills"
+                 " WHERE scenario_id = %s AND portfolio = %s ORDER BY filled_at, id",
+                 (_ledger_id(env, scenario), portfolio))
+
+
+def test_40_eur_us_stock_buy_through_the_fill_engine(env):
+    env.run(MON, backfill=True)
+    _order(env, "c200_base_ibkr", "AAPL", 0.2, MON, datetime(2026, 9, 22, 13, 30, tzinfo=UTC))
     env.run(MON + timedelta(days=1))
-    ((qty, px, rate, comm, fxfee, fees),) = env.q(
-        "SELECT qty::float8, price_usd::float8, fx_rate::float8, commission_eur::float8,"
-        " fx_fee_eur::float8, fees_eur::float8 FROM fills WHERE scenario_id = %s AND portfolio = 'A'",
-        (sid,))
-    assert qty * px / rate == pytest.approx(40.0, abs=1e-4)   # 20% of 200 EUR
-    assert (comm, fxfee, fees) == (3.00, 0.12, 3.12)
+    ((sym, qty, px, rate, comm, fxfee, fees),) = _fills(env, "c200_base_ibkr")
+    assert qty * px / rate == pytest.approx(40.0, abs=1e-4)   # 20% of 200 EUR, fractional
+    assert qty < 1
+    # IBKR: USD 0.35 minimum converted at the fill's ECB rate, plus 0.03% FX.
+    assert comm == pytest.approx(round(0.35 / rate, 4))
+    assert fxfee == pytest.approx(round(0.0003 * 40.0, 4))
+    assert fees == pytest.approx(comm + fxfee)
+
+
+def test_below_one_share_under_myinvestor(env):
+    env.run(MON, backfill=True)
+    _order(env, "c200_base_myinvestor", "AAPL", 0.2, MON, datetime(2026, 9, 22, 13, 30, tzinfo=UTC))
+    status, s = env.run(MON + timedelta(days=1))
+    # 40 EUR is about 0.13 AAPL shares; myinvestor has no fractional US stocks.
+    assert _fills(env, "c200_base_myinvestor") == []
+    assert env.q("SELECT status, status_note FROM orders WHERE scenario_id = %s AND portfolio = 'A'",
+                 (_ledger_id(env, "c200_base_myinvestor"),)) == [("skipped", "below_one_share")]
+    assert any("c200_base_myinvestor/A AAPL below_one_share" in x for x in s["skipped"])
+
+
+def test_whole_shares_under_myinvestor_round_down(env):
+    env.run(MON, backfill=True)
+    # 1000 EUR × 35% = 350 EUR ≈ 1.7 NVDA shares → 1 whole share.
+    _order(env, "c1000_aggressive_myinvestor", "NVDA", 0.35, MON,
+           datetime(2026, 9, 22, 13, 30, tzinfo=UTC))
+    env.run(MON + timedelta(days=1))
+    ((sym, qty, px, rate, comm, fxfee, fees),) = _fills(env, "c1000_aggressive_myinvestor")
+    raw_qty = 350.0 * rate / px
+    assert 1 < raw_qty < 2 and qty == 1.0
+    assert comm == 3.00 and fxfee == pytest.approx(round(0.003 * px / rate, 4))
+
+
+def test_free_order_counter_resets_at_the_start_of_each_month(env):
+    mon = date(2026, 9, 28)
+    env.run(mon, backfill=True)
+    for sym, window in [("AAPL", datetime(2026, 9, 29, 13, 30, tzinfo=UTC)),    # Sep: free
+                        ("MSFT", datetime(2026, 9, 30, 13, 30, tzinfo=UTC)),    # Sep: paid
+                        ("GOOGL", datetime(2026, 10, 1, 13, 30, tzinfo=UTC))]:  # Oct: free again
+        _order(env, "c200_base_revolut_standard", sym, 0.2, mon, window)
+    for d in (date(2026, 9, 29), date(2026, 9, 30), date(2026, 10, 1)):
+        env.run(d)
+    fills = _fills(env, "c200_base_revolut_standard")
+    assert [(f[0], f[4]) for f in fills] == [("AAPL", 0.0), ("MSFT", 1.00), ("GOOGL", 0.0)]
+    assert all(f[5] == 0 for f in fills)                     # 120 EUR: within the FX allowance
+    # Counted per ledger: B, which traded nothing, still has its free order.
+    assert _fills(env, "c200_base_revolut_standard", "B") == []
+
+
+def test_interest_accrues_over_a_weekend_for_a_b_and_c(env):
+    env.run(MON, backfill=True)
+    env.run(MON + timedelta(days=7))                          # through next Monday
+    daily = 0.023 / 365
+    sid = _ledger_id(env, "c200_base_trade_republic")
+    rows = env.q("SELECT portfolio, date, symbol, base_eur::float8, amount_eur::float8"
+                 " FROM accruals_daily WHERE scenario_id = %s AND kind = 'interest'"
+                 " ORDER BY portfolio, date", (sid,))
+    for pf in ("A", "B"):
+        mine = [r for r in rows if r[0] == pf]
+        # Tue..Mon: 7 calendar days, Saturday and Sunday included.
+        assert [r[1] for r in mine] == [MON + timedelta(days=i) for i in range(1, 8)]
+        assert {r[2] for r in mine} == {"EUR"}
+        ((eq,),) = env.q("SELECT equity_eur::float8 FROM equity_daily WHERE scenario_id = %s"
+                         " AND portfolio = %s AND date = %s", (sid, pf, MON + timedelta(days=7)))
+        assert eq == pytest.approx(200 * (1 + daily) ** 7, abs=1e-3)
+    # C gets interest on its (small, positive) uninvested cash too.
+    cid = _ledger_id(env, "bench_c200_trade_republic")
+    assert env.q("SELECT count(*) FROM accruals_daily WHERE scenario_id = %s AND kind = 'interest'",
+                 (cid,))[0][0] > 0
+    # Profiles without interest accrue none.
+    assert env.q("SELECT count(*) FROM accruals_daily a JOIN scenarios s ON s.id = a.scenario_id"
+                 " WHERE a.kind = 'interest' AND s.cost_profile <> 'trade_republic'") == [(0,)]
 
 
 def test_missing_bar_is_not_filled_and_repairs_itself(env):
@@ -226,11 +301,11 @@ def test_changing_a_parameter_deactivates_and_recreates(env):
     raw["risk_profiles"]["conservative"]["max_positions"] = 5
     env.path.write_text(yaml.safe_dump(raw, sort_keys=False))
     status, s = env.run(MON + timedelta(days=1))
-    assert sorted(s["scenarios"]["deactivated"]) == sorted(s["scenarios"]["created"]) == [
-        "c1000_conservative_myinvestor", "c200_conservative_myinvestor",
-        "c500_conservative_myinvestor"]
+    changed = sorted(s["scenarios"]["created"])
+    assert sorted(s["scenarios"]["deactivated"]) == changed
+    assert len(changed) == 15 and all("_conservative_" in n for n in changed)
     assert env.q("SELECT count(*) FROM scenarios WHERE name = 'c200_conservative_myinvestor'") == [(2,)]
-    assert env.q("SELECT count(*) FROM scenarios WHERE active_to IS NULL") == [(14,)]
+    assert env.q("SELECT count(*) FROM scenarios WHERE active_to IS NULL") == [(60,)]
 
 
 def test_time_only_moves_forward(env):

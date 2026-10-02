@@ -1,4 +1,4 @@
-# TradeLab scenario grid, risk profiles and cost profiles (SPEC v2 §1.1, §4, §5).
+# TradeLab scenario grid, risk profiles and cost profiles (SPEC v3 §1.1, §4, §5).
 #
 # Read on every daily run. Adding or removing a scenario is a config change, not
 # a code change: the next run creates the new scenario's A and B ledgers (and its
@@ -7,23 +7,24 @@
 # config_hash, which deactivates the old row and starts a new one: scenarios
 # are never edited in place.
 #
-# Units: every *_pct is a fraction (0.0012 = 0.12%); amounts are EUR; slippage
-# is in basis points.
+# Units: every *_pct is a fraction (0.0012 = 0.12%); amounts are in the fee
+# schedule's currency (EUR unless `currency: USD`); slippage and spread are in
+# basis points.
 version: 1
 
 # Strategy scenarios = grid (cartesian product) + the explicit list below.
 # Names are generated as c<capital>_<risk>_<cost> unless `name` is given.
+# Default: 3 capitals × 3 risk profiles × 5 cost profiles = 45 strategy
+# scenarios (A + B each), plus one C per (capital, cost profile) = 15 benchmarks.
 grid:
   capital_eur: [200, 500, 1000]
   risk_profile: [conservative, base, aggressive]
-  cost_profile: [myinvestor]
+  cost_profile: [ibkr, trade_republic, revolut_standard, myinvestor, zero_commission]
 
-scenarios:
-  # Fee drag (SPEC §8): the primary scenario under zero_commission.
-  - {capital_eur: 200, risk_profile: base, cost_profile: zero_commission}
+scenarios: []
 
 # Pre-registered (SPEC §1.1, §10). Only this scenario decides the verdict.
-primary: c200_base_myinvestor
+primary: c200_base_ibkr
 
 rules:
   min_trade_eur: 10          # smaller trades are skipped as below_min_size
@@ -59,23 +60,114 @@ risk_profiles:
     stop_max_pct: 0.20
     kill_switch_drawdown: 0.25
 
-# commission = min(max(pct × notional, min), max); max: null means no maximum.
+# Per asset class:
+#   commission = clamp(pct × notional + per_share × qty, min, max), computed in
+#     `currency` (default EUR; USD is converted at the fill's ECB rate). The
+#     maximum is `max` (absolute) and/or `max_pct` of the trade value; the lower
+#     one applies, and it is applied after the minimum. Missing keys mean 0 /
+#     no maximum.
+#   fx_fee_pct     on each EUR<->USD conversion (once per order), in EUR.
+#   slippage_bps + spread_bps move the execution price against us.
+#   fractional     false: buys round down to whole shares; an order under one
+#                  share is skipped as below_one_share.
+# Per profile:
+#   free_orders_per_month   the first N fills of each UTC calendar month in a
+#                           ledger, for free_order_classes, pay no commission
+#                           (FX fee still applies). Counted per ledger.
+#   fx_free_eur_per_month   EUR of conversions (fills in asset classes with an
+#                           FX fee, buys and sells) per UTC calendar month per
+#                           ledger that pay no FX fee; the fee applies only to
+#                           the part above it. Resets like free orders.
+#   etp_annual_fee_pct      crypto only, accrued daily over 365 calendar days.
+#   cash_interest_annual_pct  on positive cash, accrued daily over 365 calendar
+#                           days (accruals_daily kind 'interest'), for A, B and C.
 cost_profiles:
+  # Interactive Brokers (IBKR Pro, Tiered). Sources, checked 2026-10-01:
+  # interactivebrokers.ie commissions-stocks, the EU US-stock cost page, and
+  # /en/trading/fractional-trading.php ("IE: Fractional shares are available
+  # for all account types", min USD 1).
+  # Exchange, clearing and regulatory pass-through fees are not modeled. ETFs
+  # and crypto are modeled as Xetra-listed products in EUR (UCITS ETFs, crypto
+  # ETPs), so no FX fee on them.
+  ibkr:
+    commission:
+      stock:  {currency: USD, per_share: 0.0035, min: 0.35, max_pct: 0.01}
+      etf:    {currency: EUR, pct: 0.0005, min: 1.25, max: 29.00}
+      crypto: {currency: EUR, pct: 0.0005, min: 1.25, max: 29.00}
+    fx_fee_pct: {stock: 0.0003, etf: 0.0, crypto: 0.0}
+    slippage_bps: {stock: 2, etf: 2, crypto: 5}
+    spread_bps: {stock: 0, etf: 0, crypto: 0}
+    fractional: {stock: true, etf: true, crypto: true}
+    free_orders_per_month: 0
+    etp_annual_fee_pct: 0.015   # TO VERIFY per product (crypto ETP, same placeholder as myinvestor)
+    cash_interest_annual_pct: 0.0
+
+  # Trade Republic. Source: curvo.eu and brokerchooser.com reviews, checked
+  # 2026-10-01 (the official traderepublic.com pricing page did not load).
+  # EUR 1 external cost per order on every asset class; crypto is held
+  # directly (no ETP fee) but pays a spread. The 1 EUR fee, 0.35% FX, 1% crypto
+  # spread and 2.3% interest are from reviews: TO VERIFY on traderepublic.com.
+  trade_republic:
+    commission:
+      stock:  {pct: 0.0, min: 1.00, max: 1.00}   # TO VERIFY
+      etf:    {pct: 0.0, min: 1.00, max: 1.00}   # TO VERIFY
+      crypto: {pct: 0.0, min: 1.00, max: 1.00}   # TO VERIFY
+    fx_fee_pct: {stock: 0.0035, etf: 0.0, crypto: 0.0}   # stock FX: TO VERIFY
+    slippage_bps: {stock: 2, etf: 2, crypto: 5}
+    spread_bps: {stock: 0, etf: 0, crypto: 100}   # crypto spread: TO VERIFY
+    fractional: {stock: true, etf: true, crypto: true}
+    free_orders_per_month: 0
+    etp_annual_fee_pct: 0.0
+    cash_interest_annual_pct: 0.023   # TO VERIFY
+
+  # Revolut, Standard plan. Sources, checked 2026-10-01: help.revolut.com
+  # (en-FI) trading fees and currency exchange fees (Standard plan). One free
+  # stock/ETF order per month, then max(0.25%, EUR 1). FX: the first EUR 1,000
+  # converted per month is free, then 0.5%; the weekend markup is ignored
+  # (fills are on weekdays; Revolut crypto is in EUR). ETFs are modeled as
+  # EUR-listed, so no FX fee. Crypto 1.49% is an unverified placeholder.
+  revolut_standard:
+    commission:
+      stock:  {pct: 0.0025, min: 1.00, max: null}
+      etf:    {pct: 0.0025, min: 1.00, max: null}
+      crypto: {pct: 0.0149, min: 1.00, max: null}   # TO VERIFY: unverified placeholder
+    fx_fee_pct: {stock: 0.005, etf: 0.0, crypto: 0.0}
+    fx_free_eur_per_month: 1000   # TO VERIFY: that stock trades consume this allowance
+    slippage_bps: {stock: 2, etf: 2, crypto: 5}
+    spread_bps: {stock: 0, etf: 0, crypto: 0}
+    fractional: {stock: true, etf: true, crypto: true}
+    free_orders_per_month: 1
+    free_order_classes: [stock, etf]
+    etp_annual_fee_pct: 0.0
+    cash_interest_annual_pct: 0.0   # not modeled
+
+  # MyInvestor. Source: myinvestor.es/inversion/broker, checked 2026-10-01
+  # (fees unchanged since 29 Sep 2026). US stocks only in whole shares.
+  myinvestor:
+    commission:
+      stock:  {pct: 0.0012, min: 3.00, max: 25.00}
+      etf:    {pct: 0.0012, min: 1.00, max: 25.00}   # modeled as EUR-listed UCITS
+      crypto: {pct: 0.0012, min: 1.00, max: 25.00}   # modeled as EUR-listed ETPs
+    fx_fee_pct: {stock: 0.003, etf: 0.0, crypto: 0.0}
+    slippage_bps: {stock: 2, etf: 2, crypto: 5}
+    spread_bps: {stock: 0, etf: 0, crypto: 0}
+    fractional: {stock: false, etf: true, crypto: true}
+    free_orders_per_month: 0
+    etp_annual_fee_pct: 0.015   # TO VERIFY per product
+    cash_interest_annual_pct: 0.0
+
+  # REFERENCE ONLY, not a real broker: a fee-free baseline (only a 0.25% crypto
+  # commission and slippage) to measure fee drag. Never a broker recommendation.
+  # Source: none (synthetic), checked 2026-10-01.
   zero_commission:
     commission:
       stock:  {pct: 0.0,    min: 0.0, max: null}
       etf:    {pct: 0.0,    min: 0.0, max: null}
       crypto: {pct: 0.0025, min: 0.0, max: null}
     fx_fee_pct: {stock: 0.0, etf: 0.0, crypto: 0.0}
+    slippage_bps: {stock: 2, etf: 2, crypto: 5}
+    spread_bps: {stock: 0, etf: 0, crypto: 0}
+    fractional: {stock: true, etf: true, crypto: true}
+    free_orders_per_month: 0
     etp_annual_fee_pct: 0.0
-    slippage_bps: {stock: 2, etf: 2, crypto: 5}
-
-  # Source: myinvestor.es/inversion/broker, checked 29 Sep 2026 (SPEC §5).
-  myinvestor:
-    commission:
-      stock:  {pct: 0.0012, min: 3.00, max: 25.00}
-      etf:    {pct: 0.0012, min: 1.00, max: 25.00}   # modeled as EUR-listed UCITS
-      crypto: {pct: 0.0012, min: 1.00, max: 25.00}   # modeled as EUR-listed ETPs
-    fx_fee_pct: {stock: 0.003, etf: 0.0, crypto: 0.0}  # on each EUR<->USD conversion
-    etp_annual_fee_pct: 0.015   # TO VERIFY per product; accrued daily over 365 days
-    slippage_bps: {stock: 2, etf: 2, crypto: 5}
+    cash_interest_annual_pct: 0.0
