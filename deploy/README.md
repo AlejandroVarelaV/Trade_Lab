@@ -12,8 +12,10 @@ docker-compose.yml   # from this repo
 Everything else (code, migrations, `config/scenarios.yaml`) is inside the image.
 A scenario change is therefore a commit + a new image, which also versions it.
 
-Image: `ghcr.io/alejandrovarelav/tradelab:<git-sha>`. Each image carries the
-`org.opencontainers.image.source` label (links the package to the GitHub repo)
+Image: `ghcr.io/alejandrovarelav/tradelab:<git-sha>`, built for `linux/amd64`
+(the Hetzner CX23 is x86_64). Each image carries the
+`org.opencontainers.image.source` label
+(`https://github.com/AlejandroVarelaV/Trade_Lab`, links the package to the repo)
 and `org.opencontainers.image.revision=<git-sha>`. The SHA is also in the
 container as `TRADELAB_GIT_SHA` and is recorded in every `job_runs` row.
 
@@ -32,9 +34,10 @@ Each release (from a clean, committed tree):
 GIT_SHA=$(git rev-parse --short=12 HEAD)
 IMAGE=ghcr.io/alejandrovarelav/tradelab
 
-# Check the server's architecture once (`uname -m` on the server: aarch64 →
-# linux/arm64, x86_64 → linux/amd64) and build for that platform.
-docker buildx build --platform linux/arm64 \
+# The server (Hetzner CX23) is x86_64, so always build linux/amd64. Use the
+# `default` builder: the WSL host is x86_64 too, so it builds natively (not
+# through another builder such as an emulated arm one).
+docker buildx build --builder default --platform linux/amd64 \
   --build-arg GIT_SHA="$GIT_SHA" \
   -t "$IMAGE:$GIT_SHA" -t "$IMAGE:latest" \
   --push .
@@ -73,7 +76,23 @@ Pin the SHA, not `latest`, so the server runs exactly what you reviewed.
 `docker compose pull && docker compose up -d`. Migrations only move forward,
 so roll back code only across releases that added no migration.
 
-## 3. First deploy of Phase 1 (one-off backfill)
+## 3. Stop the local stack once the server runs
+
+Telegram allows **one** long-polling client per bot token: if the local `bot`
+runs at the same time as the server's, both get `409 Conflict` and updates go
+to whichever polled last. The local `jobs` service would also run a second
+22:30 UTC job against the local database and send its own Telegram status. As
+soon as the server's `bot` and `jobs` are up, stop them locally:
+
+```bash
+# on your machine, in the repo
+docker compose stop bot jobs
+docker compose ps            # bot and jobs must not be running
+```
+
+Keep them stopped (or `docker compose down`) for as long as the server runs.
+
+## 4. First deploy of Phase 1 (one-off backfill)
 
 ```bash
 cd /home/avarela/tradelab

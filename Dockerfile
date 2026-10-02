@@ -4,7 +4,7 @@
 FROM python:3.12-slim
 
 ARG GIT_SHA=unknown
-LABEL org.opencontainers.image.source="https://github.com/alejandrovarelav/tradelab" \
+LABEL org.opencontainers.image.source="https://github.com/AlejandroVarelaV/Trade_Lab" \
       org.opencontainers.image.revision="${GIT_SHA}" \
       org.opencontainers.image.title="tradelab"
 
