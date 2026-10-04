@@ -1,23 +1,25 @@
 # TradeLab — Claude as a paper-trading analyst, with a human in the loop
 
-Status: spec v3 (1 Oct 2026): five cost profiles over the full scenario grid, primary scenario on `ibkr`, fee engine with per-share fees, fractional flags, free orders, spreads and interest on cash. (v2, 29 Sep 2026: realistic capital in EUR, scenario grid, cost profiles.) Paper money only. No real orders, ever, in this version.
+Status: spec v4 (4 Oct 2026): arm E (Claude + news) and benchmark D (copy Congress). (v3, 1 Oct 2026: five cost profiles over the full scenario grid, primary scenario on `ibkr`, fee engine with per-share fees, fractional flags, free orders, spreads and interest on cash.) (v2, 29 Sep 2026: realistic capital in EUR, scenario grid, cost profiles.) Paper money only. No real orders, ever, in this version.
 
 ## 1. What this is and what question it answers
 
-Every day, Claude proposes trades on a small, fixed set of US stocks, ETFs and crypto. Alejandro approves or rejects each one from Telegram. Everything is simulated and logged, and three portfolios run side by side:
+Every day, Claude proposes trades on a small, fixed set of US stocks, ETFs and crypto. Alejandro approves or rejects each one from Telegram. Everything is simulated and logged, and five portfolios run side by side:
 
 | Portfolio | What it executes | Question it answers |
 |---|---|---|
 | **A: Claude alone** | Every proposal that passes the risk rules, automatically | Does Claude have any edge by itself? |
 | **B: Claude + Alejandro** | Only approved proposals | Does the human filter add or destroy value? |
 | **C: Benchmark** | 80% SPY / 20% BTC, rebalanced monthly | Is any of this better than doing nothing? |
+| **D: Copy Congress** | Rule-based group copy of disclosed congressional purchases (3.8) | Would copying the "winners" beat Claude, Alejandro and the index? |
+| **E: Claude + news** | Same as A, with headlines added to the input (3.7), executed automatically, no approvals | Does news make Claude better than without it? |
 
 The project succeeds if it produces a trustworthy answer, including "no". Making money is not the success criterion.
 
 ### 1.1 Scenarios (added in v2)
-Claude is called **once per day**. Its output is a set of target weights. Every **scenario** replays those same weights (and, for B, the same approval decisions) through its own capital, risk profile and cost profile. Scenarios cost no extra API calls.
+Claude is called **once per day**. Its output is a set of target weights. Every **scenario** replays those same weights (and, for B, the same approval decisions) through its own capital, risk profile and cost profile. Scenarios cost no extra API calls. Arm E is one more call per day (3.7), replayed the same way through every scenario.
 
-Scenarios live in `config/scenarios.yaml`. Adding or removing one is a config change plus a restart, not a code change. Each scenario gets its own A and B ledgers, plus a C benchmark per (capital, cost profile) pair. Default layout, the full grid for every cost profile:
+Scenarios live in `config/scenarios.yaml`. Adding or removing one is a config change plus a restart, not a code change. Each scenario gets its own A, B and E ledgers, plus a C and a D benchmark per (capital, cost profile) pair. Default layout, the full grid for every cost profile:
 
 | Dimension | Values |
 |---|---|
@@ -25,13 +27,13 @@ Scenarios live in `config/scenarios.yaml`. Adding or removing one is a config ch
 | Risk profile | `conservative`, `base`, `aggressive` (section 4) |
 | Cost profile (section 5) | `ibkr`, `trade_republic`, `revolut_standard`, `myinvestor`, and `zero_commission`, a fee-free **reference, not a real broker**, kept to measure fee drag |
 
-That is 3 × 3 × 5 = **45 strategy scenarios** (A and B each), plus one C benchmark per (capital, cost profile) pair = **15 benchmark ledgers**: 105 ledgers in total.
+That is 3 × 3 × 5 = **45 strategy scenarios** (A, B and E each), plus one C and one D benchmark per (capital, cost profile) pair = **30 benchmark ledgers**: 165 ledgers in total.
 
-**Primary scenario: 200 EUR / base / ibkr** (`c200_base_ibkr`). It is pre-registered, and it alone decides the verdict in section 10. All other scenarios, including the other brokers at 200 EUR / base, are descriptive. With 105 correlated ledgers, the best-looking one will be flattering by chance, so it is never promoted to "the result" after the fact.
+**Primary scenario: 200 EUR / base / ibkr** (`c200_base_ibkr`). It is pre-registered, and it alone decides the verdict in section 10. All other scenarios, including the other brokers at 200 EUR / base, are descriptive. With 165 correlated ledgers, the best-looking one will be flattering by chance, so it is never promoted to "the result" after the fact.
 
 Claude sees the state of the primary scenario's A ledger (see 3.3). Other scenarios may drift from it because their constraints differ; that drift is itself measured.
 
-Non-goals for v1: real money, leverage, shorting, options, intraday trading, news or social media input, backtesting the LLM on history (see 3.4).
+Non-goals for v1: real money, leverage, shorting, options, intraday trading, news input (except arm E) or social media input, backtesting the LLM on history (see 3.4).
 
 ## 2. Architecture
 
@@ -40,7 +42,7 @@ cron 22:30 UTC ─► ingest ─► features ─► Claude proposer ─► risk 
                                                                  │
                                           Telegram bot ◄─────────┘ (approve / reject)
                                                  │
-fill engine (next fill window) ─► ledgers A / B / C ─► daily mark-to-market ─► weekly report
+fill engine (next fill window) ─► ledgers A–E ─► daily mark-to-market ─► weekly report
                                                  └─► Alpaca paper mirror of B (plumbing only)
 ```
 
@@ -74,7 +76,7 @@ Changing the universe is a versioned decision, recorded in the database. It is n
 - Optionally, VIX and the 10y-3m yield spread, read-only from STAIR's `market_features`. This is not needed for v1; if added, it goes through a read-only database user.
 
 ### 3.4 Methodology rule: forward testing only
-The LLM must never be "backtested" on historical dates. The model has seen historical prices in training, so any backtest is contaminated. The only valid evidence is **forward** paper trading from the start date. Rule-based benchmarks (C, random) can be backtested, but they are only compared with A and B over the live period.
+The LLM must never be "backtested" on historical dates. The model has seen historical prices in training, so any backtest is contaminated. The only valid evidence is **forward** paper trading from the start date. Rule-based benchmarks (C, D, random) can be backtested, but they are only compared with A and B over the live period.
 
 ### 3.5 Output schema (tool `submit_proposals`)
 ```json
@@ -101,6 +103,20 @@ An empty proposal list is a valid and normal outcome.
 - a proposal has an unknown symbol, an empty or placeholder rationale, or a weight or stop outside the allowed range;
 - `proposals` is empty and there is no `no_trade_reason`;
 - the same symbol appears twice.
+
+### 3.7 Arm E (Claude + news)
+- **A separate API call each day**, with the same model and prompt version family as A, plus a news block: for each instrument, up to 5 headlines (title + summary, max 300 chars each) from the Alpaca news API, published in the 24 h before the run. Only articles with a publish time before the run time count (no look-ahead).
+- The news block is stored in `runs.input_snapshot` for audit. E sees its own ledger state (the primary scenario's E ledger), never A's or B's.
+- Same validator, risk clipping, cost profiles and scenario grid as A. E gets its own ledger in every strategy scenario. No approvals.
+- **E's API cost is charged only to E ledgers**; A and B keep paying only for A's call.
+- Secondary hypothesis, reported but never changing the verdict: "E beats A in the primary scenario, net of E's extra API cost."
+
+### 3.8 Benchmark D (copy Congress)
+- **Data:** congressional trade disclosures from Quiver's free data (**TO VERIFY**: terms allow automated use). Fallback: another source of the same official House/Senate disclosures.
+- **Rule, on the first run of each month:** take every purchase of a US-listed common stock disclosed by any member of the House or Senate in the previous 60 days, counted by **disclosure date, never trade date**. Rank by number of distinct members buying; ties go to the most recent disclosure, then ticker alphabetically. Hold the top 10 in equal weight; if fewer than 10 qualify, the rest stays in cash. Only tickers with Alpaca data count.
+- D never copies one named person.
+- One D ledger per (capital, cost profile), with the same fill engine and fees (stock class) as the other portfolios. D's tickers join the universe as versioned instruments (note `D universe`).
+- D is rule-based, so it may be built after Phase 3 and replayed from the start date using only disclosures dated on or before each rebalance. Replayed periods are labeled as replayed.
 
 ## 4. Risk rules: enforced in code, never trusted to the prompt
 
@@ -131,7 +147,7 @@ Claude is told the **base** limits. Each scenario clips Claude's target weights 
 
 Stops are checked on the daily mark (stock close, and crypto at 22:00 UTC), and exits fill at the next fill window. A stop counts as approved when its entry is approved, so it never waits for a tap. This is identical for A and B.
 
-## 5. Costs model (applied identically to A, B and C within a scenario)
+## 5. Costs model (applied identically to A, B, C, D and E within a scenario)
 - **Ledger currency: EUR.** Instruments are priced in USD and converted with the daily ECB EUR/USD reference rate. This applies to all assets, including ETFs and crypto that `ibkr` and `myinvestor` model as EUR-listed products: the USD price stays the price source, so currency moves are part of the result, as they would be with real money.
 - **Fee engine.** For each order, per asset class of the cost profile:
   - **Commission** = `clamp(pct × notional + per_share × qty, min, max)`. Each fee schedule has a **currency**: EUR, or USD (IBKR US stocks), which is converted to EUR at the fill's ECB rate. The maximum is an absolute amount and/or a **% of trade value**; if both are set the lower applies, and the maximum is applied after the minimum, so on a tiny trade it wins (IBKR's 1% cap).
@@ -201,19 +217,21 @@ Stops are checked on the daily mark (stock close, and crypto at 22:00 UTC), and 
 - `approvals(proposal_id, decision[approve|reject|timeout], reason, decided_at)`
 - `scenarios(id, name, capital_eur, risk_profile, cost_profile, config_hash, active_from, active_to, is_primary)`. Scenarios are only ever deactivated, never edited: changing a parameter creates a new scenario row.
 - `scenario_adjustments(scenario_id, proposal_id, adjusted_weight, rule_fired)`
-- `fills(id, scenario_id, portfolio[A|B|C], proposal_id null, symbol, side, qty, price_usd, fx_rate, fees_eur, filled_at, fill_source[internal|alpaca])`
+- `fills(id, scenario_id, portfolio[A|B|C|D|E], proposal_id null, symbol, side, qty, price_usd, fx_rate, fees_eur, filled_at, fill_source[internal|alpaca])`
 - `positions_daily(scenario_id, portfolio, date, symbol, qty, avg_price_eur, market_value_eur, stop_price)`
 - `equity_daily(scenario_id, portfolio, date, equity_eur, cash_eur, drawdown)`
 - `fx_daily(date, eurusd, source)`
 - `api_costs(date, input_tokens, output_tokens, usd, eur)`
 - `schema_migrations`, using the same custom-runner pattern as STAIR (filename, sha256, applied_at)
 
+Portfolios are A | B | C | D | E. The database CHECK on `portfolio` is widened to D and E in a new migration when they're built.
+
 Everything is append-only except the daily snapshots. A proposal is written **before** any outcome exists, and its timestamp is the proof.
 
 ## 8. Reporting
 Weekly (Sunday) Telegram message plus a markdown file in `reports/`, always in this order:
-1. **The primary scenario alone** (200 EUR / base / ibkr): for A, B and C, net return, annualized volatility, Sharpe, max drawdown, number of trades, win rate, average win vs average loss, total fees and total API cost as a percentage of capital; then A minus B, which is the value of Alejandro's filter.
-2. **Broker comparison at 200 EUR / base**: one row per cost profile (`ibkr`, `trade_republic`, `revolut_standard`, `myinvestor`, `zero_commission`). Columns: B's net return, C's net return, B − C, fees (commission + FX) as % of capital, interest earned, and orders skipped as `below_one_share`. The `zero_commission` row is labeled "reference, not a broker"; the gap between it and `ibkr` is the primary scenario's fee drag.
+1. **The primary scenario alone** (200 EUR / base / ibkr): for A, B and C, plus E (labeled "secondary") and D (labeled "rule-based benchmark"), net return, annualized volatility, Sharpe, max drawdown, number of trades, win rate, average win vs average loss, total fees and total API cost as a percentage of capital; then A minus B, which is the value of Alejandro's filter.
+2. **Broker comparison at 200 EUR / base**: one row per cost profile (`ibkr`, `trade_republic`, `revolut_standard`, `myinvestor`, `zero_commission`). Columns: B's net return, C's net return, B − C, E's net return ("secondary"), D's net return ("rule-based benchmark"), fees (commission + FX) as % of capital, interest earned, and orders skipped as `below_one_share`. The `zero_commission` row is labeled "reference, not a broker"; the gap between it and `ibkr` is the primary scenario's fee drag.
 3. **Appendix: the full grid**, titled "descriptive only, not selected results": every (capital, risk, cost profile) scenario with the same columns as (2).
 - Approval stats: approve, reject and timeout rates, and the reject-reason breakdown.
 - API cost to date.
@@ -230,9 +248,9 @@ Gate: `psql` shows the migrations applied; the bot answers `/ping`; the Alpaca `
 Build ingestion for the 18 instruments plus the ECB EUR/USD rate, feature computation, `config/scenarios.yaml` loading, the fill engine, both cost profiles, daily mark-to-market, and the C benchmarks for every (capital, cost profile) pair running live.
 Gate: 5 consecutive daily runs with no gaps (`bars_daily` count per symbol matches trading days, `fx_daily` has one row per ECB business day); one C ledger reconciles by hand for one day (qty × price_usd ÷ eurusd + cash); crypto has 7 bars per week, stocks 5; a unit test shows a 40 EUR US-stock buy under `myinvestor` paying 3.00 EUR commission (the minimum, not 0.12%) plus 0.12 EUR FX; adding a scenario to the YAML and restarting creates its ledgers with no code change.
 
-**Phase 2: Claude proposer + validator, portfolio A only**
-Build the proposer, validation with retries, risk clipping, and A trading automatically. Telegram gets read-only proposal messages.
-Gate: 5 runs with `runs.status` all `ok` or explained; tests feed deliberately rule-breaking proposals (over-weight, no stop, crypto cap, unknown symbol) and each one is clipped or dropped with the rule logged; `api_costs` filled; no fill for A before its proposal's `created_at`.
+**Phase 2: Claude proposer + validator, portfolios A and E**
+Build the proposer, validation with retries, risk clipping, and A trading automatically. E (3.7) is built together with A: the news ingestion and E's separate daily call. Telegram gets read-only proposal messages.
+Gate: 5 runs with `runs.status` all `ok` or explained; tests feed deliberately rule-breaking proposals (over-weight, no stop, crypto cap, unknown symbol) and each one is clipped or dropped with the rule logged; `api_costs` filled; no fill for A or E before its proposal's `created_at`; no headline in E's `input_snapshot` is published after its run time.
 
 **Phase 3: approval flow, portfolio B, Alpaca mirror**
 Build the Telegram buttons and reasons, timeout handling, B's ledger, and the Alpaca paper orders for B.
@@ -245,11 +263,16 @@ Gate: one weekly report generated from real data; a simulated missing-bar failur
 **Phase 5 (optional, after 4 weeks live): random baseline R**
 R makes random proposals with the same frequency, sizes and stops as A. If A can't beat R, Claude is adding noise, not insight.
 
+**Phase 6 (after Phase 3): benchmark D**
+Build the disclosure ingestion, D's monthly rebalance rule (3.8), the `D universe` instruments and the D ledgers, replayed from the start date if built later.
+Gate: one month of D rebalances reconciles by hand (disclosures in the 60-day window → ranking → top 10 → equal-weight orders and fills).
+
 ## 10. Evaluation plan (pre-registered, written before any results)
-- **Start date = first daily job_run on the production server with the proposer (Phase 2) and the approval flow (Phase 3) both live.** At that run, every scenario is re-created (new config_hash generation) so A, B and C all start from their capital on the same day. Ledgers from earlier phases are test data and are never reported.
+- **Start date = first daily job_run on the production server with the proposer (Phase 2) and the approval flow (Phase 3) both live.** At that run, every scenario is re-created (new config_hash generation) so A, B and C all start from their capital on the same day. Ledgers from earlier phases are test data and are never reported. Every month below counts from it.
 - **Months 0–3:** a learning run. Fix bugs, observe behavior, don't conclude anything about profitability.
 - **Month 6:** first real review. B's net return and Sharpe are compared with C's, and A minus B shows the filter's effect.
 - **All criteria below are evaluated on the primary scenario only** (200 EUR / base / ibkr). Results from other scenarios, including the broker comparison, can explain *why* (for example, "fees ate the edge at 200 EUR but not at 1000 EUR", or "it only works under the `zero_commission` reference"), but they can't turn a "no" into a "yes". `zero_commission` is a reference, not a broker, so a result that only holds there is a "no".
+- **D and E are descriptive.** The verdict criteria are unchanged (primary scenario, B vs C, A vs R); D and E can never turn a "no" into a "yes".
 - **Month 12:** decision point. "Worth considering with real money" requires **all** of the following:
   1. B beats C net of all costs, including API costs.
   2. B's max drawdown is no worse than C's.
