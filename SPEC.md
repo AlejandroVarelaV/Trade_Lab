@@ -200,19 +200,19 @@ Stops are checked on the daily mark (stock close, and crypto at 22:00 UTC), and 
   - **Values marked TO VERIFY** are unverified placeholders or come from third-party reviews (`trade_republic`), not the broker's own pricing page.
   - **Spread** is a fixed number of bps, not the live quoted spread.
   - **Free orders and the FX allowance** are counted by UTC calendar month, and the broker's own month boundary may differ.
-- **LLM cost:** the daily Anthropic API cost is recorded in `api_costs`, converted to EUR, and deducted in full from **every** A and B ledger when reporting net returns. It is not split across scenarios, because a real single account would pay all of it.
+- **LLM cost:** the daily Anthropic API cost is recorded in `api_costs` per arm, converted to EUR, and deducted in full when reporting net returns: A's from **every** A and B ledger, E's from **every** E ledger (section 7). It is not split across scenarios, because a real single account would pay all of it.
 - Starting capital is set per scenario (200 / 500 / 1000 EUR).
 
 ## 6. Telegram approval flow
 - One message per proposal: symbol, action, target weight, stop, confidence, the rationale, and the current price.
 - Inline buttons: ✅ Approve, ❌ Reject. On reject, a second tap picks a reason: `disagree`, `too risky`, `no time to check`, `other`. The `no time to check` rate is itself a key metric, because it shows when approval has turned into rubber-stamping.
-- One daily summary after fills: what filled, the equity of A, B and C, and whether any stops were hit.
+- One daily summary after fills: what filled, the equity of A, B, C and E (and D once built), and whether any stops were hit.
 - No "approve all" button. The point of B is a per-trade decision.
 
 ## 7. Data model (Postgres)
 - `instruments(symbol, asset_class, active_from, active_to)`
 - `bars_daily(symbol, date, open, high, low, close, volume, source)`
-- `runs(id, started_at, model, prompt_version, input_snapshot jsonb, raw_response jsonb, attempts, status, cost_usd)`
+- `runs(id, arm[A|E], started_at, model, prompt_version, input_snapshot jsonb, raw_response jsonb, attempts, status, cost_usd)`
 - `proposals(id, run_id, symbol, action, target_weight, stop_loss_pct, horizon_days, confidence, rationale, original jsonb, validator_status, validator_notes)`
 - `approvals(proposal_id, decision[approve|reject|timeout], reason, decided_at)`
 - `scenarios(id, name, capital_eur, risk_profile, cost_profile, config_hash, active_from, active_to, is_primary)`. Scenarios are only ever deactivated, never edited: changing a parameter creates a new scenario row.
@@ -221,10 +221,12 @@ Stops are checked on the daily mark (stock close, and crypto at 22:00 UTC), and 
 - `positions_daily(scenario_id, portfolio, date, symbol, qty, avg_price_eur, market_value_eur, stop_price)`
 - `equity_daily(scenario_id, portfolio, date, equity_eur, cash_eur, drawdown)`
 - `fx_daily(date, eurusd, source)`
-- `api_costs(date, input_tokens, output_tokens, usd, eur)`
+- `api_costs(date, arm[A|E], input_tokens, output_tokens, usd, eur)`
 - `schema_migrations`, using the same custom-runner pattern as STAIR (filename, sha256, applied_at)
 
 Portfolios are A | B | C | D | E. The database CHECK on `portfolio` is widened to D and E in a new migration when they're built.
+
+Proposals take their arm from their run. A's API cost is charged to the A and B ledgers and E's only to the E ledgers, in every scenario. Each ledger pays the full daily cost of its arm, as one person running that strategy alone would.
 
 Everything is append-only except the daily snapshots. A proposal is written **before** any outcome exists, and its timestamp is the proof.
 
@@ -268,7 +270,7 @@ Build the disclosure ingestion, D's monthly rebalance rule (3.8), the `D univers
 Gate: one month of D rebalances reconciles by hand (disclosures in the 60-day window → ranking → top 10 → equal-weight orders and fills).
 
 ## 10. Evaluation plan (pre-registered, written before any results)
-- **Start date = first daily job_run on the production server with the proposer (Phase 2) and the approval flow (Phase 3) both live.** At that run, every scenario is re-created (new config_hash generation) so A, B and C all start from their capital on the same day. Ledgers from earlier phases are test data and are never reported. Every month below counts from it.
+- **Start date = first daily job_run on the production server with the proposer (Phase 2) and the approval flow (Phase 3) both live.** At that run, every scenario is re-created (new config_hash generation) so A, B, C and E all start from their capital on the same day; D is replayed from that day (3.8). Ledgers from earlier phases are test data and are never reported. Every month below counts from it.
 - **Months 0–3:** a learning run. Fix bugs, observe behavior, don't conclude anything about profitability.
 - **Month 6:** first real review. B's net return and Sharpe are compared with C's, and A minus B shows the filter's effect.
 - **All criteria below are evaluated on the primary scenario only** (200 EUR / base / ibkr). Results from other scenarios, including the broker comparison, can explain *why* (for example, "fees ate the edge at 200 EUR but not at 1000 EUR", or "it only works under the `zero_commission` reference"), but they can't turn a "no" into a "yes". `zero_commission` is a reference, not a broker, so a result that only holds there is a "no".
@@ -280,7 +282,7 @@ Gate: one month of D rebalances reconciles by hand (disclosures in the 60-day wi
   4. The `no time to check` rate is under 20%.
   
   Otherwise the conclusion is "no edge demonstrated", which is a valid and useful result.
-- Any change to prompts, the universe or the rules starts a new `prompt_version`. Results are reported per version and never pooled across versions.
+- Any change to prompts, the universe or the rules starts a new `prompt_version`. Results are reported per version and never pooled across versions. A and E share one `prompt_version`. E's prompt is A's prompt plus the news block, so a change to either one bumps both.
 
 ## 11. Things to know before ever going live (out of scope for v1)
 - EU retail investors generally can't buy US-domiciled ETFs like SPY with real money, because of the EU's key-information-document rules. A live version would need UCITS equivalents, and possibly a different broker (for example IBKR).
