@@ -6,6 +6,7 @@ rule with self-repair, monthly rebalance, scenarios from YAML without code.
 """
 from datetime import date, datetime, timedelta, timezone
 
+import httpx
 import psycopg2
 import pytest
 import yaml
@@ -177,6 +178,20 @@ def test_free_order_counter_resets_at_the_start_of_each_month(env):
     assert all(f[5] == 0 for f in fills)                     # 120 EUR: within the FX allowance
     # Counted per ledger: B, which traded nothing, still has its free order.
     assert _fills(env, "c200_base_revolut_standard", "B") == []
+
+
+def test_ecb_failure_does_not_roll_back_the_bars(env):
+    def ecb_down(start, end):
+        raise httpx.ReadTimeout("ECB down")
+
+    with pytest.raises(httpx.ReadTimeout):
+        daily.run(env.conn, settings.load(), daily_run_time(MON), client=env.market,
+                  crypto_price=env.market.crypto_first_minute, fx_fetch=ecb_down,
+                  scenarios_path=env.path)
+    assert env.q("SELECT count(*) FROM bars_daily")[0][0] > 0       # committed before FX
+    assert env.q("SELECT count(*) FROM fx_daily")[0][0] == 0
+    ((status, error),) = env.q("SELECT status, summary->>'error' FROM job_runs")
+    assert status == "error" and "ECB down" in error
 
 
 def test_interest_accrues_over_a_weekend_for_a_b_and_c(env):

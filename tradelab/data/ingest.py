@@ -100,11 +100,14 @@ def upsert_calendar(cur, sessions: list[Session]) -> int:
     return len(sessions)
 
 
-def ingest(cur, client: AlpacaClient, t: datetime, *, backfill: bool = False,
-           fx_fetch=ecb.fetch) -> dict:
-    """Fetch and upsert everything complete at time t. Returns a report dict."""
+def _window(t: datetime, backfill: bool) -> tuple[date, date]:
     last_day = last_complete_day(t)
-    first_day = last_day - timedelta(days=(BACKFILL_DAYS if backfill else REINGEST_DAYS) - 1)
+    return last_day - timedelta(days=(BACKFILL_DAYS if backfill else REINGEST_DAYS) - 1), last_day
+
+
+def ingest(cur, client: AlpacaClient, t: datetime, *, backfill: bool = False) -> dict:
+    """Fetch and upsert the calendar and Alpaca bars complete at time t (FX: ingest_fx)."""
+    first_day, last_day = _window(t, backfill)
     universe = instruments(cur)
     stocks = [s for s, c in universe.items() if c in ("stock", "etf")]
     cryptos = [s for s, c in universe.items() if c == "crypto"]
@@ -119,16 +122,20 @@ def ingest(cur, client: AlpacaClient, t: datetime, *, backfill: bool = False,
     if last_session and last_session >= first_day:
         stock_bars, stock_rejected = client.stock_daily_bars(stocks, first_day, last_session)
     crypto_bars, crypto_issues = client.crypto_daily_bars(cryptos, first_day, last_day)
-    fx_rows, fx_rejected = fx_fetch(first_day, last_day)
 
     return {
         "window": [first_day.isoformat(), last_day.isoformat()],
         "last_session": last_session.isoformat() if last_session else None,
         "bars": upsert_bars(cur, stock_bars + crypto_bars).as_dict(),
-        "fx": upsert_fx(cur, fx_rows).as_dict(),
-        "rejected": stock_rejected + fx_rejected,
+        "rejected": stock_rejected,
         "crypto_issues": crypto_issues,
     }
+
+
+def ingest_fx(cur, t: datetime, *, backfill: bool = False, fx_fetch=ecb.fetch) -> dict:
+    """Fetch and upsert the ECB EUR/USD rates over the same window as `ingest`."""
+    fx_rows, fx_rejected = fx_fetch(*_window(t, backfill))
+    return {"fx": upsert_fx(cur, fx_rows).as_dict(), "rejected": fx_rejected}
 
 
 def find_gaps(cur, t: datetime, since: date) -> dict[str, list[str]]:

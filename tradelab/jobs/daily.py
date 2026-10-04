@@ -67,12 +67,18 @@ def run(conn, cfg: settings.Settings, t: datetime, *, backfill: bool = False,
         client = client or AlpacaClient(cfg.alpaca_key_id, cfg.alpaca_secret_key, cfg.alpaca_base_url)
         crypto_price = crypto_price or client.crypto_first_minute
 
-        with conn, conn.cursor() as cur:          # commit data even if a later step fails
-            rep = ingest.ingest(cur, client, t, backfill=backfill, fx_fetch=fx_fetch)
-            summary["ingest"] = {k: rep[k] for k in ("window", "last_session", "bars", "fx")}
+        # Commit data even if a later step fails; bars first, so an ECB failure
+        # doesn't roll them back.
+        with conn, conn.cursor() as cur:
+            rep = ingest.ingest(cur, client, t, backfill=backfill)
+            summary["ingest"] = {k: rep[k] for k in ("window", "last_session", "bars")}
             summary["rejected"] = rep["rejected"]
             summary["crypto_issues"] = [i for i in rep["crypto_issues"] if "only" not in i]
             summary["crypto_partial_days"] = [i for i in rep["crypto_issues"] if "only" in i]
+        with conn, conn.cursor() as cur:
+            fx_rep = ingest.ingest_fx(cur, t, backfill=backfill, fx_fetch=fx_fetch)
+            summary["ingest"]["fx"] = fx_rep["fx"]
+            summary["rejected"] += fx_rep["rejected"]
 
         with conn, conn.cursor() as cur:
             cur.execute("SELECT min(date) FROM bars_daily")
