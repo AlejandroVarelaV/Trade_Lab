@@ -28,6 +28,7 @@ DATA_URL = "https://data.alpaca.markets"
 NEW_YORK = ZoneInfo("America/New_York")
 SOURCE_STOCK = "alpaca_iex_1d_raw"
 SOURCE_CRYPTO = "alpaca_crypto_1h_22utc"
+ATTEMPTS = 4
 
 
 @dataclass(frozen=True)
@@ -138,17 +139,25 @@ class AlpacaClient:
         self._http = http or httpx.Client(timeout=30)
 
     def _get(self, url: str, params: dict) -> dict | list:
-        for attempt in range(4):
-            resp = self._http.get(url, params=params, headers=self._headers)
-            if resp.status_code == 429 or resp.status_code >= 500:
-                wait = 2 ** attempt
+        """4 attempts, exponential backoff (1, 2, 4 s) on timeouts, 429 and 5xx."""
+        for attempt in range(ATTEMPTS):
+            last = attempt == ATTEMPTS - 1
+            wait = 2 ** attempt
+            try:
+                resp = self._http.get(url, params=params, headers=self._headers)
+            except httpx.TimeoutException as exc:
+                if last:
+                    raise
+                log.warning("alpaca %s on %s, retry in %ss", type(exc).__name__, url, wait)
+                time.sleep(wait)
+                continue
+            if (resp.status_code == 429 or resp.status_code >= 500) and not last:
                 log.warning("alpaca %s on %s, retry in %ss", resp.status_code, url, wait)
                 time.sleep(wait)
                 continue
             resp.raise_for_status()
             return resp.json()
-        resp.raise_for_status()
-        return resp.json()
+        raise AssertionError("unreachable")
 
     def _bars(self, path: str, params: dict) -> dict[str, list[dict]]:
         out: dict[str, list[dict]] = {}
