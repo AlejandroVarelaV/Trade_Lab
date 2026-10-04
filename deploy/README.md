@@ -30,7 +30,13 @@ echo "$GHCR_TOKEN" | docker login ghcr.io -u alejandrovarelav --password-stdin
 
 Each release (from a clean, committed tree):
 
+**Required check before building.** Run `git status --porcelain`. If it prints
+anything, stop: commit or stash first. The image tag is the commit SHA, so the
+build must match that commit exactly.
+
 ```bash
+git status --porcelain     # must print nothing; otherwise stop here
+
 GIT_SHA=$(git rev-parse --short=12 HEAD)
 IMAGE=ghcr.io/alejandrovarelav/tradelab
 
