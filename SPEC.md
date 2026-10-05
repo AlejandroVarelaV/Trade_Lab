@@ -25,7 +25,7 @@ Scenarios live in `config/scenarios.yaml`. Adding or removing one is a config ch
 |---|---|
 | Capital (EUR) | 200, 500, 1000 |
 | Risk profile | `conservative`, `base`, `aggressive` (section 4) |
-| Cost profile (section 5) | `ibkr`, `trade_republic`, `revolut_standard`, `myinvestor`, and `zero_commission`, a fee-free **reference, not a real broker**, kept to measure fee drag |
+| Cost profile (section 5) | `ibkr`, `trade_republic`, `revolut_standard`, `myinvestor`, and `zero_commission`, commission-free on stocks and ETFs, with a 0.25% crypto commission and the same slippage as the other profiles; a reference, not a broker, kept to measure fee drag |
 
 That is 3 × 3 × 5 = **45 strategy scenarios** (A, B and E each), plus one C and one D benchmark per (capital, cost profile) pair = **30 benchmark ledgers**: 165 ledgers in total.
 
@@ -176,7 +176,7 @@ Stops are checked on the daily mark (stock close, and crypto at 22:00 UTC), and 
   - `trade_republic`: curvo.eu and brokerchooser.com reviews; the official traderepublic.com pricing page did not load. The EUR 1 fee, 0.35% FX, 1% crypto spread and 2.3% interest are **from reviews, TO VERIFY on traderepublic.com**.
   - `revolut_standard`: help.revolut.com (en-FI) trading fees and currency exchange fees, Standard plan. The weekend FX markup is ignored: fills are on weekdays, and Revolut crypto is in EUR. Crypto 1.49% is an **unverified placeholder**.
   - `myinvestor`: myinvestor.es/inversion/broker (unchanged from 29 Sep 2026).
-  - `zero_commission` has no source: it's synthetic, a reference and never a broker recommendation.
+  - `zero_commission` has no source: it's synthetic (see section 1.1) and never a broker recommendation.
 
   Every **TO VERIFY** value is a placeholder that must be checked before results are read; changing it later creates new scenario rows (section 7).
 
@@ -233,7 +233,7 @@ Everything is append-only except the daily snapshots. A proposal is written **be
 ## 8. Reporting
 Weekly (Sunday) Telegram message plus a markdown file in `reports/`, always in this order:
 1. **The primary scenario alone** (200 EUR / base / ibkr): for A, B and C, plus E (labeled "secondary") and D (labeled "rule-based benchmark"), net return, annualized volatility, Sharpe, max drawdown, number of trades, win rate, average win vs average loss, total fees and total API cost as a percentage of capital; then A minus B, which is the value of Alejandro's filter.
-2. **Broker comparison at 200 EUR / base**: one row per cost profile (`ibkr`, `trade_republic`, `revolut_standard`, `myinvestor`, `zero_commission`). Columns: B's net return, C's net return, B − C, E's net return ("secondary"), D's net return ("rule-based benchmark"), fees (commission + FX) as % of capital, interest earned, and orders skipped as `below_one_share`. The `zero_commission` row is labeled "reference, not a broker"; the gap between it and `ibkr` is the primary scenario's fee drag.
+2. **Broker comparison at 200 EUR / base**: one row per cost profile (`ibkr`, `trade_republic`, `revolut_standard`, `myinvestor`, `zero_commission`). Columns: B's net return, C's net return, B − C, E's net return ("secondary"), D's net return ("rule-based benchmark"), fees (commission + FX) as % of capital, interest earned, and orders skipped as `below_one_share`. The `zero_commission` row is labeled "reference, not a broker". The gap between it and `ibkr` is the primary scenario's fee drag relative to this reference. Since the reference charges 0.25% on crypto, it slightly understates the drag versus zero cost.
 3. **Appendix: the full grid**, titled "descriptive only, not selected results": every (capital, risk, cost profile) scenario with the same columns as (2).
 - Approval stats: approve, reject and timeout rates, and the reject-reason breakdown.
 - API cost to date.
@@ -273,7 +273,7 @@ Gate: one month of D rebalances reconciles by hand (disclosures in the 60-day wi
 - **Start date = first daily job_run on the production server with the proposer (Phase 2) and the approval flow (Phase 3) both live.** At that run, every scenario is re-created (new config_hash generation) so A, B, C and E all start from their capital on the same day; D is replayed from that day (3.8). Ledgers from earlier phases are test data and are never reported. Every month below counts from it.
 - **Months 0–3:** a learning run. Fix bugs, observe behavior, don't conclude anything about profitability.
 - **Month 6:** first real review. B's net return and Sharpe are compared with C's, and A minus B shows the filter's effect.
-- **All criteria below are evaluated on the primary scenario only** (200 EUR / base / ibkr). Results from other scenarios, including the broker comparison, can explain *why* (for example, "fees ate the edge at 200 EUR but not at 1000 EUR", or "it only works under the `zero_commission` reference"), but they can't turn a "no" into a "yes". `zero_commission` is a reference, not a broker, so a result that only holds there is a "no".
+- **All criteria below are evaluated on the primary scenario only** (200 EUR / base / ibkr). Results from other scenarios, including the broker comparison, can explain *why* (for example, "fees ate the edge at 200 EUR but not at 1000 EUR", or "it only works under the `zero_commission` reference"), but they can't turn a "no" into a "yes". `zero_commission` is a reference, not a broker (section 1.1), so a result that only holds there is a "no".
 - **D and E are descriptive.** The verdict criteria are unchanged (primary scenario, B vs C, A vs R); D and E can never turn a "no" into a "yes".
 - **Month 12:** decision point. "Worth considering with real money" requires **all** of the following:
   1. B beats C net of all costs, including API costs.
